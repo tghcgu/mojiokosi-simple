@@ -31,6 +31,13 @@ using System.Runtime.InteropServices;
 
 public static class NativeWindowTools
 {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
 
@@ -67,6 +74,23 @@ public static class NativeWindowTools
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
 
+    [DllImport("user32.dll", EntryPoint = "SendMessage")]
+    private static extern IntPtr SendMessagePoint(IntPtr hWnd, uint message, IntPtr wParam, ref NativePoint lParam);
+
+    public static int GetRichEditScrollY(IntPtr hWnd)
+    {
+        NativePoint point = new NativePoint();
+        SendMessagePoint(hWnd, EM_GETSCROLLPOS, IntPtr.Zero, ref point);
+        return point.Y;
+    }
+
+    public static void SetRichEditScrollY(IntPtr hWnd, int y)
+    {
+        NativePoint point = new NativePoint();
+        point.Y = Math.Max(0, y);
+        SendMessagePoint(hWnd, EM_SETSCROLLPOS, IntPtr.Zero, ref point);
+    }
+
     public const byte VK_LWIN = 0x5B;
     public const byte VK_CONTROL = 0x11;
     public const byte VK_L = 0x4C;
@@ -79,9 +103,19 @@ public static class NativeWindowTools
     public const uint WM_CLOSE = 0x0010;
     public const uint WM_NCLBUTTONDOWN = 0x00A1;
     public const int HTCAPTION = 0x0002;
+    public const int HTLEFT = 0x000A;
+    public const int HTRIGHT = 0x000B;
+    public const int HTTOP = 0x000C;
+    public const int HTTOPLEFT = 0x000D;
+    public const int HTTOPRIGHT = 0x000E;
+    public const int HTBOTTOM = 0x000F;
+    public const int HTBOTTOMLEFT = 0x0010;
+    public const int HTBOTTOMRIGHT = 0x0011;
     public const int GWL_EXSTYLE = -20;
     public const int WS_EX_TOOLWINDOW = 0x00000080;
     public const int WS_EX_APPWINDOW = 0x00040000;
+    private const uint EM_GETSCROLLPOS = 0x04DD;
+    private const uint EM_SETSCROLLPOS = 0x04DE;
 }
 "@
 
@@ -1140,6 +1174,7 @@ $form.BackColor = $backgroundColor
 $form.Padding = New-Object System.Windows.Forms.Padding(24, 54, 24, 24)
 $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
 $form.Opacity = 1.0
+$form.MinimumSize = New-Object System.Drawing.Size(360, 180)
 
 $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 $form.Width = [Math]::Min(1100, [Math]::Max(480, $workingArea.Width - 80))
@@ -1153,7 +1188,7 @@ $textDisplay.Dock = [System.Windows.Forms.DockStyle]::Fill
 $textDisplay.ReadOnly = $true
 $textDisplay.TabStop = $false
 $textDisplay.BorderStyle = [System.Windows.Forms.BorderStyle]::None
-$textDisplay.ScrollBars = [System.Windows.Forms.RichTextBoxScrollBars]::None
+$textDisplay.ScrollBars = [System.Windows.Forms.RichTextBoxScrollBars]::Vertical
 $textDisplay.WordWrap = $true
 $textDisplay.DetectUrls = $false
 $textDisplay.BackColor = $backgroundColor
@@ -1183,8 +1218,90 @@ $form.Controls.Add($closeButton)
 $closeButton.BringToFront()
 $form.ActiveControl = $null
 
+$resizeBorderThickness = 8
+
+function Get-ResizeHitTestCode {
+    param(
+        [System.Windows.Forms.Form]$TargetForm,
+        [System.Drawing.Point]$Point,
+        [int]$BorderThickness
+    )
+
+    $isLeft = $Point.X -lt $BorderThickness
+    $isRight = $Point.X -ge ($TargetForm.ClientSize.Width - $BorderThickness)
+    $isTop = $Point.Y -lt $BorderThickness
+    $isBottom = $Point.Y -ge ($TargetForm.ClientSize.Height - $BorderThickness)
+
+    if ($isTop -and $isLeft) { return [NativeWindowTools]::HTTOPLEFT }
+    if ($isTop -and $isRight) { return [NativeWindowTools]::HTTOPRIGHT }
+    if ($isBottom -and $isLeft) { return [NativeWindowTools]::HTBOTTOMLEFT }
+    if ($isBottom -and $isRight) { return [NativeWindowTools]::HTBOTTOMRIGHT }
+    if ($isLeft) { return [NativeWindowTools]::HTLEFT }
+    if ($isRight) { return [NativeWindowTools]::HTRIGHT }
+    if ($isTop) { return [NativeWindowTools]::HTTOP }
+    if ($isBottom) { return [NativeWindowTools]::HTBOTTOM }
+
+    return [NativeWindowTools]::HTCAPTION
+}
+
+function Test-TextDisplayAtBottom {
+    if ($textDisplay.TextLength -eq 0 -or $textDisplay.ClientSize.Height -le 2) {
+        return $true
+    }
+
+    $bottomPoint = New-Object System.Drawing.Point(1, ($textDisplay.ClientSize.Height - 2))
+    $lastVisibleCharacter = $textDisplay.GetCharIndexFromPosition($bottomPoint)
+    $lastVisibleLine = $textDisplay.GetLineFromCharIndex($lastVisibleCharacter)
+    $lastTextLine = $textDisplay.GetLineFromCharIndex($textDisplay.TextLength)
+
+    return $lastVisibleLine -ge $lastTextLine
+}
+
+function Set-TranscriptDisplayText {
+    param(
+        [string]$Text,
+        [switch]$PreserveUserScroll
+    )
+
+    if (-not $PreserveUserScroll) {
+        $textDisplay.Text = $Text
+        return
+    }
+
+    $wasAtBottom = (Test-TextDisplayAtBottom) -and $textDisplay.SelectionLength -eq 0
+    $scrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplay.Handle)
+    $selectionStart = $textDisplay.SelectionStart
+    $selectionLength = $textDisplay.SelectionLength
+
+    $textDisplay.Text = $Text
+
+    if ($wasAtBottom) {
+        $textDisplay.SelectionStart = $textDisplay.TextLength
+        $textDisplay.SelectionLength = 0
+        $textDisplay.ScrollToCaret()
+        return
+    }
+
+    $selectionStart = [Math]::Min($selectionStart, $textDisplay.TextLength)
+    $selectionLength = [Math]::Min($selectionLength, $textDisplay.TextLength - $selectionStart)
+    $textDisplay.Select($selectionStart, $selectionLength)
+    [NativeWindowTools]::SetRichEditScrollY($textDisplay.Handle, $scrollY)
+}
+
 $formClosed = $false
+$followTailAfterResize = $false
 $form.Add_FormClosed({ $script:formClosed = $true })
+$form.Add_ResizeBegin({
+    $script:followTailAfterResize = Test-TextDisplayAtBottom
+})
+$form.Add_ResizeEnd({
+    if ($script:followTailAfterResize) {
+        $textDisplay.SelectionStart = $textDisplay.TextLength
+        $textDisplay.SelectionLength = 0
+        $textDisplay.ScrollToCaret()
+    }
+    $script:followTailAfterResize = $false
+})
 $closeOnEscape = {
     param($sender, $eventArgs)
     if ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Escape) {
@@ -1201,14 +1318,39 @@ $textDisplay.Add_PreviewKeyDown({
     }
 })
 $textDisplay.Add_KeyDown($closeOnEscape)
+$form.Add_MouseMove({
+    param($sender, $eventArgs)
+
+    if ($eventArgs.Button -ne [System.Windows.Forms.MouseButtons]::None) {
+        return
+    }
+
+    $hitTest = Get-ResizeHitTestCode -TargetForm $sender -Point $eventArgs.Location -BorderThickness $resizeBorderThickness
+    if ($hitTest -eq [NativeWindowTools]::HTLEFT -or $hitTest -eq [NativeWindowTools]::HTRIGHT) {
+        $sender.Cursor = [System.Windows.Forms.Cursors]::SizeWE
+    } elseif ($hitTest -eq [NativeWindowTools]::HTTOP -or $hitTest -eq [NativeWindowTools]::HTBOTTOM) {
+        $sender.Cursor = [System.Windows.Forms.Cursors]::SizeNS
+    } elseif ($hitTest -eq [NativeWindowTools]::HTTOPLEFT -or $hitTest -eq [NativeWindowTools]::HTBOTTOMRIGHT) {
+        $sender.Cursor = [System.Windows.Forms.Cursors]::SizeNWSE
+    } elseif ($hitTest -eq [NativeWindowTools]::HTTOPRIGHT -or $hitTest -eq [NativeWindowTools]::HTBOTTOMLEFT) {
+        $sender.Cursor = [System.Windows.Forms.Cursors]::SizeNESW
+    } else {
+        $sender.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+})
+$form.Add_MouseLeave({
+    param($sender, $eventArgs)
+    $sender.Cursor = [System.Windows.Forms.Cursors]::Default
+})
 $form.Add_MouseDown({
     param($sender, $eventArgs)
     if ($eventArgs.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+        $hitTest = Get-ResizeHitTestCode -TargetForm $sender -Point $eventArgs.Location -BorderThickness $resizeBorderThickness
         [NativeWindowTools]::ReleaseCapture() | Out-Null
         [NativeWindowTools]::SendMessage(
             $sender.Handle,
             [NativeWindowTools]::WM_NCLBUTTONDOWN,
-            [IntPtr][NativeWindowTools]::HTCAPTION,
+            [IntPtr]$hitTest,
             [IntPtr]::Zero
         ) | Out-Null
     }
@@ -1428,10 +1570,7 @@ try {
         $displayText = Get-TranscriptText -Captured $capturedText -Pending $pendingCaptionText -IncludePending
         if (-not [string]::IsNullOrWhiteSpace($displayText) -and $displayText -ne $lastDisplayedText) {
             Save-CapturedText -Text $displayText
-            $textDisplay.Text = $displayText
-            $textDisplay.SelectionStart = $textDisplay.TextLength
-            $textDisplay.SelectionLength = 0
-            $textDisplay.ScrollToCaret()
+            Set-TranscriptDisplayText -Text $displayText -PreserveUserScroll
             $lastDisplayedText = $displayText
         }
 
@@ -1472,4 +1611,3 @@ try {
         }
     }
 }
-
