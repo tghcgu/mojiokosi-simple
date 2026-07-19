@@ -1292,7 +1292,7 @@ $formClosed = $false
 $followTailAfterResize = $false
 $form.Add_FormClosed({ $script:formClosed = $true })
 $form.Add_ResizeBegin({
-    $script:followTailAfterResize = Test-TextDisplayAtBottom
+    $script:followTailAfterResize = (Test-TextDisplayAtBottom) -and $textDisplay.SelectionLength -eq 0
 })
 $form.Add_ResizeEnd({
     if ($script:followTailAfterResize) {
@@ -1537,9 +1537,12 @@ try {
         if (-not $liveCaptionsMovedOffScreen) {
             $form.Activate()
             [NativeWindowTools]::SetForegroundWindow($form.Handle) | Out-Null
-            $textDisplay.SelectionStart = 0
-            $textDisplay.SelectionLength = 0
-            $textDisplay.ScrollToCaret()
+            if ([string]::IsNullOrWhiteSpace($capturedText) -and
+                [string]::IsNullOrWhiteSpace($pendingCaptionText)) {
+                $textDisplay.SelectionStart = 0
+                $textDisplay.SelectionLength = 0
+                $textDisplay.ScrollToCaret()
+            }
             $form.ActiveControl = $null
             $form.Focus() | Out-Null
             $liveCaptionsMovedOffScreen = $true
