@@ -35,7 +35,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\.app\Install-Shortcuts
 画面の操作ボタンは、右上の閉じる `×` だけです。
 
 - 移動: 画面の外側の余白をドラッグ
+- サイズ変更: 画面の四辺または四隅をドラッグ
+- スクロール: マウスホイールまたは右側のスクロールバーを使用
 - 終了: 右上の `×`、`Esc`、または `Alt + F4`
+
+最新行を表示している間は、新しい文字起こしへ自動で追従します。上へスクロールして過去の行を読んでいる間は、表示位置を保ちます。
 
 終了すると、裏で使っていた Windows ライブ キャプションも自動で閉じます。
 
@@ -52,4 +56,3 @@ transcripts/caption-20260719-120000-123.txt
 このソフトは Windows 11 のライブ キャプションを認識エンジンとして使います。起動のたびにライブ キャプションを新しく開始するため、マイク入力は既定でオフになり、Windows の既定の音声出力デバイスだけが対象になります。
 
 詳しい仕様は [Microsoft のライブ キャプション案内](https://support.microsoft.com/ja-jp/accessibility/windows/use-live-captions-to-better-understand-audio) を参照してください。
-
