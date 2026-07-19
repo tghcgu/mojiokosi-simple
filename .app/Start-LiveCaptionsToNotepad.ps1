@@ -38,6 +38,15 @@ public static class NativeWindowTools
         public int Y;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct NativeRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
 
@@ -70,6 +79,9 @@ public static class NativeWindowTools
 
     [DllImport("user32.dll")]
     public static extern bool ReleaseCapture();
+
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out NativeRect rect);
 
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
@@ -1290,25 +1302,162 @@ function Set-TranscriptDisplayText {
 
 $isFullScreen = $false
 $windowedBounds = $form.Bounds
+$windowedSnapMode = "None"
+$snapMode = "None"
+$normalBounds = $form.Bounds
 
-function Toggle-FullScreen {
+function Set-TranscriptWindowBounds {
+    param([System.Drawing.Rectangle]$Bounds)
+
     $followTail = (Test-TextDisplayAtBottom) -and $textDisplay.SelectionLength -eq 0
+    $scrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplay.Handle)
+    $selectionStart = $textDisplay.SelectionStart
+    $selectionLength = $textDisplay.SelectionLength
 
-    if (-not $script:isFullScreen) {
-        $script:windowedBounds = $form.Bounds
-        $script:isFullScreen = $true
-        $form.Bounds = [System.Windows.Forms.Screen]::FromControl($form).Bounds
-    } else {
-        $script:isFullScreen = $false
-        $form.Bounds = $script:windowedBounds
-    }
-
+    $form.Bounds = $Bounds
     $form.PerformLayout()
+
     if ($followTail) {
         $textDisplay.SelectionStart = $textDisplay.TextLength
         $textDisplay.SelectionLength = 0
         $textDisplay.ScrollToCaret()
+        return
     }
+
+    $selectionStart = [Math]::Min($selectionStart, $textDisplay.TextLength)
+    $selectionLength = [Math]::Min($selectionLength, $textDisplay.TextLength - $selectionStart)
+    $textDisplay.Select($selectionStart, $selectionLength)
+    [NativeWindowTools]::SetRichEditScrollY($textDisplay.Handle, $scrollY)
+}
+
+function Toggle-FullScreen {
+
+    if (-not $script:isFullScreen) {
+        $script:windowedBounds = $form.Bounds
+        $script:windowedSnapMode = $script:snapMode
+        $script:isFullScreen = $true
+        Set-TranscriptWindowBounds -Bounds ([System.Windows.Forms.Screen]::FromControl($form).Bounds)
+    } else {
+        $script:isFullScreen = $false
+        $script:snapMode = $script:windowedSnapMode
+        Set-TranscriptWindowBounds -Bounds $script:windowedBounds
+    }
+}
+
+function Get-WindowSnapTarget {
+    param([System.Drawing.Point]$CursorPosition)
+
+    $screen = [System.Windows.Forms.Screen]::FromPoint($CursorPosition)
+    $screenBounds = $screen.Bounds
+    $workingArea = $screen.WorkingArea
+    $dragSize = [System.Windows.Forms.SystemInformation]::DragSize
+    $threshold = [Math]::Max(12, [Math]::Max($dragSize.Width, $dragSize.Height) * 2)
+
+    $nearLeft = $CursorPosition.X -le ($screenBounds.Left + $threshold)
+    $nearRight = $CursorPosition.X -ge ($screenBounds.Right - 1 - $threshold)
+    $nearTop = $CursorPosition.Y -le ($screenBounds.Top + $threshold)
+    $nearBottom = $CursorPosition.Y -ge ($screenBounds.Bottom - 1 - $threshold)
+
+    $leftWidth = [int][Math]::Floor($workingArea.Width / 2)
+    $topHeight = [int][Math]::Floor($workingArea.Height / 2)
+    $middleX = $workingArea.Left + $leftWidth
+    $middleY = $workingArea.Top + $topHeight
+
+    if ($nearLeft -and $nearTop) {
+        return [pscustomobject]@{
+            Mode = "TopLeft"
+            Bounds = [System.Drawing.Rectangle]::FromLTRB($workingArea.Left, $workingArea.Top, $middleX, $middleY)
+        }
+    }
+    if ($nearRight -and $nearTop) {
+        return [pscustomobject]@{
+            Mode = "TopRight"
+            Bounds = [System.Drawing.Rectangle]::FromLTRB($middleX, $workingArea.Top, $workingArea.Right, $middleY)
+        }
+    }
+    if ($nearLeft -and $nearBottom) {
+        return [pscustomobject]@{
+            Mode = "BottomLeft"
+            Bounds = [System.Drawing.Rectangle]::FromLTRB($workingArea.Left, $middleY, $middleX, $workingArea.Bottom)
+        }
+    }
+    if ($nearRight -and $nearBottom) {
+        return [pscustomobject]@{
+            Mode = "BottomRight"
+            Bounds = [System.Drawing.Rectangle]::FromLTRB($middleX, $middleY, $workingArea.Right, $workingArea.Bottom)
+        }
+    }
+    if ($nearTop) {
+        return [pscustomobject]@{
+            Mode = "Maximized"
+            Bounds = $workingArea
+        }
+    }
+    if ($nearLeft) {
+        return [pscustomobject]@{
+            Mode = "Left"
+            Bounds = [System.Drawing.Rectangle]::FromLTRB($workingArea.Left, $workingArea.Top, $middleX, $workingArea.Bottom)
+        }
+    }
+    if ($nearRight) {
+        return [pscustomobject]@{
+            Mode = "Right"
+            Bounds = [System.Drawing.Rectangle]::FromLTRB($middleX, $workingArea.Top, $workingArea.Right, $workingArea.Bottom)
+        }
+    }
+
+    return $null
+}
+
+function Set-WindowSnapAtCursor {
+    param(
+        [System.Drawing.Point]$CursorPosition,
+        [System.Drawing.Rectangle]$RestoreBounds
+    )
+
+    $target = Get-WindowSnapTarget -CursorPosition $CursorPosition
+    if ($null -eq $target) {
+        return $false
+    }
+
+    if ($script:snapMode -eq "None") {
+        $script:normalBounds = $RestoreBounds
+    }
+
+    $script:snapMode = $target.Mode
+    Set-TranscriptWindowBounds -Bounds $target.Bounds
+    return $true
+}
+
+function Restore-SnappedWindowAtCursor {
+    param(
+        [System.Drawing.Point]$CursorPosition,
+        [double]$HorizontalGrabRatio,
+        [int]$HeaderGrabOffset
+    )
+
+    if ($script:snapMode -eq "None") {
+        return
+    }
+
+    $workingArea = [System.Windows.Forms.Screen]::FromPoint($CursorPosition).WorkingArea
+    $width = [Math]::Min($script:normalBounds.Width, $workingArea.Width)
+    $height = [Math]::Min($script:normalBounds.Height, $workingArea.Height)
+    $width = [Math]::Max($form.MinimumSize.Width, $width)
+    $height = [Math]::Max($form.MinimumSize.Height, $height)
+    $HorizontalGrabRatio = [Math]::Max(0.05, [Math]::Min(0.95, $HorizontalGrabRatio))
+    $HeaderGrabOffset = [Math]::Max(0, [Math]::Min(($form.Padding.Top - 1), $HeaderGrabOffset))
+
+    $left = $CursorPosition.X - [int][Math]::Round($width * $HorizontalGrabRatio)
+    $top = $CursorPosition.Y - $HeaderGrabOffset
+    $maximumLeft = [Math]::Max($workingArea.Left, $workingArea.Right - $width)
+    $maximumTop = [Math]::Max($workingArea.Top, $workingArea.Bottom - $form.Padding.Top)
+    $left = [Math]::Max($workingArea.Left, [Math]::Min($maximumLeft, $left))
+    $top = [Math]::Max($workingArea.Top, [Math]::Min($maximumTop, $top))
+
+    $restoredBounds = [System.Drawing.Rectangle]::FromLTRB($left, $top, ($left + $width), ($top + $height))
+    $script:snapMode = "None"
+    Set-TranscriptWindowBounds -Bounds $restoredBounds
 }
 
 $formClosed = $false
@@ -1401,6 +1550,12 @@ $form.Add_MouseDown({
         if ($script:isFullScreen) {
             return
         }
+
+        $dragStartPoint = [System.Windows.Forms.Cursor]::Position
+        $boundsBeforeMove = $form.Bounds
+        $snapModeBeforeMove = $script:snapMode
+        $horizontalGrabRatio = $eventArgs.X / [Math]::Max(1, $form.ClientSize.Width)
+        $headerGrabOffset = $eventArgs.Y
         [NativeWindowTools]::ReleaseCapture() | Out-Null
         [NativeWindowTools]::SendMessage(
             $sender.Handle,
@@ -1408,6 +1563,61 @@ $form.Add_MouseDown({
             [IntPtr]$hitTest,
             [IntPtr]::Zero
         ) | Out-Null
+
+        $nativeBounds = New-Object NativeWindowTools+NativeRect
+        $hasNativeBounds = [NativeWindowTools]::GetWindowRect($sender.Handle, [ref]$nativeBounds)
+        $boundsAfterOperation = if ($hasNativeBounds) {
+            [System.Drawing.Rectangle]::FromLTRB(
+                $nativeBounds.Left,
+                $nativeBounds.Top,
+                $nativeBounds.Right,
+                $nativeBounds.Bottom
+            )
+        } else {
+            $form.Bounds
+        }
+        $boundsChanged = -not $boundsAfterOperation.Equals($boundsBeforeMove)
+
+        if ($hitTest -ne [NativeWindowTools]::HTCAPTION) {
+            $resizeEndPoint = [System.Windows.Forms.Cursor]::Position
+            $resizeDragSize = [System.Windows.Forms.SystemInformation]::DragSize
+            $wasResized = (
+                [Math]::Abs($resizeEndPoint.X - $dragStartPoint.X) -ge [Math]::Max(1, [int][Math]::Ceiling($resizeDragSize.Width / 2)) -or
+                [Math]::Abs($resizeEndPoint.Y - $dragStartPoint.Y) -ge [Math]::Max(1, [int][Math]::Ceiling($resizeDragSize.Height / 2))
+            )
+            if ($wasResized -and $boundsChanged) {
+                $script:snapMode = "None"
+                $script:normalBounds = $boundsAfterOperation
+            }
+            return
+        }
+
+        $dropPoint = [System.Windows.Forms.Cursor]::Position
+        $dragSize = [System.Windows.Forms.SystemInformation]::DragSize
+        $minimumX = [Math]::Max(1, [int][Math]::Ceiling($dragSize.Width / 2))
+        $minimumY = [Math]::Max(1, [int][Math]::Ceiling($dragSize.Height / 2))
+        $draggedFarEnough = (
+            [Math]::Abs($dropPoint.X - $dragStartPoint.X) -ge $minimumX -or
+            [Math]::Abs($dropPoint.Y - $dragStartPoint.Y) -ge $minimumY
+        )
+        if (-not $draggedFarEnough -or -not $boundsChanged) {
+            return
+        }
+
+        $didSnap = Set-WindowSnapAtCursor -CursorPosition $dropPoint -RestoreBounds $boundsBeforeMove
+        if ($didSnap) {
+            return
+        }
+
+        if ($snapModeBeforeMove -ne "None") {
+            Restore-SnappedWindowAtCursor `
+                -CursorPosition $dropPoint `
+                -HorizontalGrabRatio $horizontalGrabRatio `
+                -HeaderGrabOffset $headerGrabOffset
+        } else {
+            $script:snapMode = "None"
+            $script:normalBounds = $form.Bounds
+        }
     }
 })
 $form.Show()
