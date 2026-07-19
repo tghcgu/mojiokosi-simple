@@ -1168,7 +1168,7 @@ $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
 $form.ControlBox = $false
 $form.ShowIcon = $false
 $form.ShowInTaskbar = $true
-$form.TopMost = $true
+$form.TopMost = $false
 $form.KeyPreview = $true
 $form.BackColor = $backgroundColor
 $form.Padding = New-Object System.Windows.Forms.Padding(24, 54, 24, 24)
@@ -1288,8 +1288,32 @@ function Set-TranscriptDisplayText {
     [NativeWindowTools]::SetRichEditScrollY($textDisplay.Handle, $scrollY)
 }
 
+$isFullScreen = $false
+$windowedBounds = $form.Bounds
+
+function Toggle-FullScreen {
+    $followTail = (Test-TextDisplayAtBottom) -and $textDisplay.SelectionLength -eq 0
+
+    if (-not $script:isFullScreen) {
+        $script:windowedBounds = $form.Bounds
+        $script:isFullScreen = $true
+        $form.Bounds = [System.Windows.Forms.Screen]::FromControl($form).Bounds
+    } else {
+        $script:isFullScreen = $false
+        $form.Bounds = $script:windowedBounds
+    }
+
+    $form.PerformLayout()
+    if ($followTail) {
+        $textDisplay.SelectionStart = $textDisplay.TextLength
+        $textDisplay.SelectionLength = 0
+        $textDisplay.ScrollToCaret()
+    }
+}
+
 $formClosed = $false
 $followTailAfterResize = $false
+$f11Held = $false
 $form.Add_FormClosed({ $script:formClosed = $true })
 $form.Add_ResizeBegin({
     $script:followTailAfterResize = (Test-TextDisplayAtBottom) -and $textDisplay.SelectionLength -eq 0
@@ -1302,26 +1326,46 @@ $form.Add_ResizeEnd({
     }
     $script:followTailAfterResize = $false
 })
-$closeOnEscape = {
+$handleWindowKeys = {
     param($sender, $eventArgs)
     if ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Escape) {
         $eventArgs.Handled = $true
         $eventArgs.SuppressKeyPress = $true
         $form.Close()
+    } elseif ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::F11) {
+        $eventArgs.Handled = $true
+        $eventArgs.SuppressKeyPress = $true
+        if (-not $script:f11Held) {
+            $script:f11Held = $true
+            Toggle-FullScreen
+        }
     }
 }
-$form.Add_KeyDown($closeOnEscape)
+$releaseWindowKeys = {
+    param($sender, $eventArgs)
+    if ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::F11) {
+        $script:f11Held = $false
+        $eventArgs.Handled = $true
+        $eventArgs.SuppressKeyPress = $true
+    }
+}
+$form.Add_KeyDown($handleWindowKeys)
+$form.Add_KeyUp($releaseWindowKeys)
 $textDisplay.Add_PreviewKeyDown({
     param($sender, $eventArgs)
-    if ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Escape) {
+    if ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Escape -or
+        $eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::F11) {
         $eventArgs.IsInputKey = $true
     }
 })
-$textDisplay.Add_KeyDown($closeOnEscape)
+$textDisplay.Add_KeyDown($handleWindowKeys)
+$textDisplay.Add_KeyUp($releaseWindowKeys)
 $form.Add_MouseMove({
     param($sender, $eventArgs)
 
-    if ($eventArgs.Button -ne [System.Windows.Forms.MouseButtons]::None) {
+    if ($script:isFullScreen -or
+        $eventArgs.Button -ne [System.Windows.Forms.MouseButtons]::None) {
+        $sender.Cursor = [System.Windows.Forms.Cursors]::Default
         return
     }
 
@@ -1346,6 +1390,18 @@ $form.Add_MouseDown({
     param($sender, $eventArgs)
     if ($eventArgs.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
         $hitTest = Get-ResizeHitTestCode -TargetForm $sender -Point $eventArgs.Location -BorderThickness $resizeBorderThickness
+        $isTopMarginDoubleClick = (
+            $eventArgs.Clicks -ge 2 -and
+            $eventArgs.Y -lt $form.Padding.Top -and
+            $hitTest -eq [NativeWindowTools]::HTCAPTION
+        )
+        if ($isTopMarginDoubleClick) {
+            Toggle-FullScreen
+            return
+        }
+        if ($script:isFullScreen) {
+            return
+        }
         [NativeWindowTools]::ReleaseCapture() | Out-Null
         [NativeWindowTools]::SendMessage(
             $sender.Handle,
@@ -1369,6 +1425,7 @@ $capturedText = ""
 $pendingCaptionText = ""
 $lastDisplayedText = ""
 $liveCaptionsMovedOffScreen = $false
+$hasActivatedTranscriptWindow = $false
 
 function Save-CapturedText {
     param([string]$Text)
@@ -1535,16 +1592,19 @@ try {
 
         Move-LiveCaptionsOffScreen -Window $liveCaptionsWindow
         if (-not $liveCaptionsMovedOffScreen) {
-            $form.Activate()
-            [NativeWindowTools]::SetForegroundWindow($form.Handle) | Out-Null
-            if ([string]::IsNullOrWhiteSpace($capturedText) -and
-                [string]::IsNullOrWhiteSpace($pendingCaptionText)) {
-                $textDisplay.SelectionStart = 0
-                $textDisplay.SelectionLength = 0
-                $textDisplay.ScrollToCaret()
+            if (-not $hasActivatedTranscriptWindow) {
+                $form.Activate()
+                [NativeWindowTools]::SetForegroundWindow($form.Handle) | Out-Null
+                if ([string]::IsNullOrWhiteSpace($capturedText) -and
+                    [string]::IsNullOrWhiteSpace($pendingCaptionText)) {
+                    $textDisplay.SelectionStart = 0
+                    $textDisplay.SelectionLength = 0
+                    $textDisplay.ScrollToCaret()
+                }
+                $form.ActiveControl = $null
+                $form.Focus() | Out-Null
+                $hasActivatedTranscriptWindow = $true
             }
-            $form.ActiveControl = $null
-            $form.Focus() | Out-Null
             $liveCaptionsMovedOffScreen = $true
         }
         $snapshot = Get-LiveCaptionSnapshot -Window $liveCaptionsWindow
