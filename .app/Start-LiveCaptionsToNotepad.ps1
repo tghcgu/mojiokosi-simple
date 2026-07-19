@@ -1334,7 +1334,6 @@ $handleWindowKeys = {
         $form.Close()
     } elseif ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::F11) {
         $eventArgs.Handled = $true
-        $eventArgs.SuppressKeyPress = $true
         if (-not $script:f11Held) {
             $script:f11Held = $true
             Toggle-FullScreen
