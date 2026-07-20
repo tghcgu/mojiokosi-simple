@@ -27,7 +27,10 @@ Add-Type -AssemblyName System.Drawing
 
 Add-Type @"
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 public static class NativeWindowTools
 {
@@ -128,6 +131,353 @@ public static class NativeWindowTools
     public const int WS_EX_APPWINDOW = 0x00040000;
     private const uint EM_GETSCROLLPOS = 0x04DD;
     private const uint EM_SETSCROLLPOS = 0x04DE;
+}
+
+public static class ForegroundWinArrowMonitor
+{
+    private const int WH_KEYBOARD_LL = 13;
+    private const int WM_KEYDOWN = 0x0100;
+    private const int WM_KEYUP = 0x0101;
+    private const int WM_SYSKEYDOWN = 0x0104;
+    private const int WM_SYSKEYUP = 0x0105;
+    private const uint WM_QUIT = 0x0012;
+    private const int VK_SHIFT = 0x10;
+    private const int VK_CONTROL = 0x11;
+    private const int VK_MENU = 0x12;
+    private const int VK_LWIN = 0x5B;
+    private const int VK_RWIN = 0x5C;
+    private const int VK_LSHIFT = 0xA0;
+    private const int VK_RSHIFT = 0xA1;
+    private const int VK_LCONTROL = 0xA2;
+    private const int VK_RCONTROL = 0xA3;
+    private const int VK_LMENU = 0xA4;
+    private const int VK_RMENU = 0xA5;
+    public const int VK_LEFT = 0x25;
+    public const int VK_UP = 0x26;
+    public const int VK_RIGHT = 0x27;
+    public const int VK_DOWN = 0x28;
+
+    private delegate IntPtr LowLevelKeyboardProc(int code, IntPtr message, IntPtr data);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KeyboardHookData
+    {
+        public uint VirtualKey;
+        public uint ScanCode;
+        public uint Flags;
+        public uint Time;
+        public UIntPtr ExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct HookPoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeMessage
+    {
+        public IntPtr Window;
+        public uint Message;
+        public UIntPtr WParam;
+        public IntPtr LParam;
+        public uint Time;
+        public HookPoint Point;
+        public uint Private;
+    }
+
+    private static readonly object SyncRoot = new object();
+    private static readonly Queue<int> PendingKeys = new Queue<int>();
+    private static readonly LowLevelKeyboardProc HookProcedure = HandleKeyboardMessage;
+    private static readonly ManualResetEvent HookReady = new ManualResetEvent(false);
+    private static IntPtr hookHandle = IntPtr.Zero;
+    private static IntPtr targetWindow = IntPtr.Zero;
+    private static Thread hookThread;
+    private static uint hookThreadId;
+    private static bool stopRequested;
+    private static int heldArrowMask;
+    private static int heldModifierMask;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int hookType, LowLevelKeyboardProc callback, IntPtr module, uint threadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hook);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr message, IntPtr data);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetMessage(out NativeMessage message, IntPtr window, uint minimum, uint maximum);
+
+    [DllImport("user32.dll")]
+    private static extern bool PeekMessage(out NativeMessage message, IntPtr window, uint minimum, uint maximum, uint remove);
+
+    [DllImport("user32.dll")]
+    private static extern bool TranslateMessage(ref NativeMessage message);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr DispatchMessage(ref NativeMessage message);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool PostThreadMessage(uint threadId, uint message, UIntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr GetModuleHandle(string moduleName);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    public static bool Install(IntPtr window)
+    {
+        Uninstall();
+
+        Thread newThread;
+        lock (SyncRoot)
+        {
+            targetWindow = window;
+            PendingKeys.Clear();
+            heldArrowMask = 0;
+            heldModifierMask = 0;
+            stopRequested = false;
+            HookReady.Reset();
+            newThread = new Thread(RunHookThread);
+            newThread.IsBackground = true;
+            newThread.Name = "MojiokosiWinArrowMonitor";
+            hookThread = newThread;
+        }
+
+        newThread.Start();
+        if (!HookReady.WaitOne(3000))
+        {
+            Uninstall();
+            return false;
+        }
+
+        lock (SyncRoot)
+        {
+            return hookHandle != IntPtr.Zero;
+        }
+    }
+
+    public static void Uninstall()
+    {
+        IntPtr handleToRemove;
+        Thread threadToStop;
+        uint threadIdToStop;
+        lock (SyncRoot)
+        {
+            stopRequested = true;
+            handleToRemove = hookHandle;
+            threadToStop = hookThread;
+            threadIdToStop = hookThreadId;
+            hookHandle = IntPtr.Zero;
+            hookThread = null;
+            hookThreadId = 0;
+            targetWindow = IntPtr.Zero;
+            PendingKeys.Clear();
+            heldArrowMask = 0;
+            heldModifierMask = 0;
+        }
+
+        if (handleToRemove != IntPtr.Zero)
+        {
+            UnhookWindowsHookEx(handleToRemove);
+        }
+        if (threadIdToStop != 0)
+        {
+            PostThreadMessage(threadIdToStop, WM_QUIT, UIntPtr.Zero, IntPtr.Zero);
+        }
+        if (threadToStop != null && threadToStop != Thread.CurrentThread && threadToStop.IsAlive)
+        {
+            threadToStop.Join(3000);
+        }
+    }
+
+    public static int TakePendingKey()
+    {
+        lock (SyncRoot)
+        {
+            return PendingKeys.Count == 0 ? 0 : PendingKeys.Dequeue();
+        }
+    }
+
+    private static IntPtr HandleKeyboardMessage(int code, IntPtr message, IntPtr data)
+    {
+        if (code >= 0)
+        {
+            int messageCode = unchecked((int)message.ToInt64());
+            KeyboardHookData key = (KeyboardHookData)Marshal.PtrToStructure(data, typeof(KeyboardHookData));
+            bool isKeyDown = messageCode == WM_KEYDOWN || messageCode == WM_SYSKEYDOWN;
+            bool isKeyUp = messageCode == WM_KEYUP || messageCode == WM_SYSKEYUP;
+            int modifierMask = GetModifierMask(key.VirtualKey);
+            if (modifierMask != 0)
+            {
+                lock (SyncRoot)
+                {
+                    if (isKeyDown)
+                    {
+                        heldModifierMask |= modifierMask;
+                    }
+                    else if (isKeyUp)
+                    {
+                        heldModifierMask &= ~modifierMask;
+                    }
+                }
+            }
+            else
+            {
+                int arrowMask = GetArrowMask(key.VirtualKey);
+                if (arrowMask != 0)
+                {
+                    if (isKeyUp)
+                    {
+                        lock (SyncRoot)
+                        {
+                            heldArrowMask &= ~arrowMask;
+                        }
+                    }
+                    else if (isKeyDown)
+                    {
+                        bool firstPress;
+                        lock (SyncRoot)
+                        {
+                            firstPress = (heldArrowMask & arrowMask) == 0;
+                            heldArrowMask |= arrowMask;
+                        }
+
+                        if (firstPress && IsPlainWinShortcut() && GetForegroundWindow() == targetWindow)
+                        {
+                            lock (SyncRoot)
+                            {
+                                if (PendingKeys.Count < 8)
+                                {
+                                    PendingKeys.Enqueue(unchecked((int)key.VirtualKey));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return CallNextHookEx(IntPtr.Zero, code, message, data);
+    }
+
+    private static void RunHookThread()
+    {
+        IntPtr installedHook = IntPtr.Zero;
+        try
+        {
+            uint currentThreadId = GetCurrentThreadId();
+            NativeMessage firstMessage;
+            PeekMessage(out firstMessage, IntPtr.Zero, 0, 0, 0);
+            lock (SyncRoot)
+            {
+                hookThreadId = currentThreadId;
+                if (stopRequested)
+                {
+                    HookReady.Set();
+                    return;
+                }
+            }
+
+            using (Process process = Process.GetCurrentProcess())
+            using (ProcessModule module = process.MainModule)
+            {
+                installedHook = SetWindowsHookEx(
+                    WH_KEYBOARD_LL,
+                    HookProcedure,
+                    GetModuleHandle(module.ModuleName),
+                    0
+                );
+            }
+
+            lock (SyncRoot)
+            {
+                if (stopRequested)
+                {
+                    HookReady.Set();
+                    return;
+                }
+                hookHandle = installedHook;
+            }
+            HookReady.Set();
+
+            if (installedHook == IntPtr.Zero)
+            {
+                return;
+            }
+
+            NativeMessage message;
+            while (GetMessage(out message, IntPtr.Zero, 0, 0) > 0)
+            {
+                TranslateMessage(ref message);
+                DispatchMessage(ref message);
+            }
+        }
+        finally
+        {
+            lock (SyncRoot)
+            {
+                if (hookHandle == installedHook)
+                {
+                    hookHandle = IntPtr.Zero;
+                }
+                if (hookThread == Thread.CurrentThread)
+                {
+                    hookThread = null;
+                    hookThreadId = 0;
+                }
+            }
+            if (installedHook != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(installedHook);
+            }
+            HookReady.Set();
+        }
+    }
+
+    private static bool IsPlainWinShortcut()
+    {
+        lock (SyncRoot)
+        {
+            const int winMask = 0x0003;
+            const int otherModifierMask = 0x1FFC;
+            return (heldModifierMask & winMask) != 0 &&
+                (heldModifierMask & otherModifierMask) == 0;
+        }
+    }
+
+    private static int GetArrowMask(uint virtualKey)
+    {
+        if (virtualKey == VK_LEFT) return 1;
+        if (virtualKey == VK_UP) return 2;
+        if (virtualKey == VK_RIGHT) return 4;
+        if (virtualKey == VK_DOWN) return 8;
+        return 0;
+    }
+
+    private static int GetModifierMask(uint virtualKey)
+    {
+        if (virtualKey == VK_LWIN) return 0x0001;
+        if (virtualKey == VK_RWIN) return 0x0002;
+        if (virtualKey == VK_SHIFT) return 0x0004;
+        if (virtualKey == VK_LSHIFT) return 0x0008;
+        if (virtualKey == VK_RSHIFT) return 0x0010;
+        if (virtualKey == VK_CONTROL) return 0x0020;
+        if (virtualKey == VK_LCONTROL) return 0x0040;
+        if (virtualKey == VK_RCONTROL) return 0x0080;
+        if (virtualKey == VK_MENU) return 0x0100;
+        if (virtualKey == VK_LMENU) return 0x0200;
+        if (virtualKey == VK_RMENU) return 0x0400;
+        return 0;
+    }
 }
 "@
 
@@ -1460,9 +1810,147 @@ function Restore-SnappedWindowAtCursor {
     Set-TranscriptWindowBounds -Bounds $restoredBounds
 }
 
+function Get-WindowSnapBoundsForMode {
+    param(
+        [System.Windows.Forms.Screen]$Screen,
+        [ValidateSet("Left", "Right", "TopLeft", "TopRight", "BottomLeft", "BottomRight", "Maximized")]
+        [string]$Mode
+    )
+
+    $workingArea = $Screen.WorkingArea
+    $leftWidth = [int][Math]::Floor($workingArea.Width / 2)
+    $topHeight = [int][Math]::Floor($workingArea.Height / 2)
+    $middleX = $workingArea.Left + $leftWidth
+    $middleY = $workingArea.Top + $topHeight
+
+    switch ($Mode) {
+        "Left" {
+            return [System.Drawing.Rectangle]::FromLTRB($workingArea.Left, $workingArea.Top, $middleX, $workingArea.Bottom)
+        }
+        "Right" {
+            return [System.Drawing.Rectangle]::FromLTRB($middleX, $workingArea.Top, $workingArea.Right, $workingArea.Bottom)
+        }
+        "TopLeft" {
+            return [System.Drawing.Rectangle]::FromLTRB($workingArea.Left, $workingArea.Top, $middleX, $middleY)
+        }
+        "TopRight" {
+            return [System.Drawing.Rectangle]::FromLTRB($middleX, $workingArea.Top, $workingArea.Right, $middleY)
+        }
+        "BottomLeft" {
+            return [System.Drawing.Rectangle]::FromLTRB($workingArea.Left, $middleY, $middleX, $workingArea.Bottom)
+        }
+        "BottomRight" {
+            return [System.Drawing.Rectangle]::FromLTRB($middleX, $middleY, $workingArea.Right, $workingArea.Bottom)
+        }
+        "Maximized" {
+            return $workingArea
+        }
+    }
+}
+
+function Set-WindowSnapMode {
+    param(
+        [ValidateSet("Left", "Right", "TopLeft", "TopRight", "BottomLeft", "BottomRight", "Maximized")]
+        [string]$Mode,
+        [System.Windows.Forms.Screen]$Screen = [System.Windows.Forms.Screen]::FromControl($form)
+    )
+
+    if ($script:isFullScreen) {
+        Toggle-FullScreen
+    }
+    if ($form.WindowState -ne [System.Windows.Forms.FormWindowState]::Normal) {
+        $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+    }
+    if ($script:snapMode -eq "None") {
+        $script:normalBounds = $form.Bounds
+    }
+
+    $script:snapMode = $Mode
+    Set-TranscriptWindowBounds -Bounds (Get-WindowSnapBoundsForMode -Screen $Screen -Mode $Mode)
+}
+
+function Restore-WindowFromSnap {
+    if ($script:snapMode -eq "None") {
+        return
+    }
+
+    if ($form.WindowState -ne [System.Windows.Forms.FormWindowState]::Normal) {
+        $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+    }
+    $restoreBounds = $script:normalBounds
+    $script:snapMode = "None"
+    Set-TranscriptWindowBounds -Bounds $restoreBounds
+}
+
+function Invoke-WinArrowShortcut {
+    param([int]$VirtualKey)
+
+    if ($script:formClosed -or $form.IsDisposed) {
+        return
+    }
+
+    if ($script:isFullScreen) {
+        if ($VirtualKey -eq [ForegroundWinArrowMonitor]::VK_UP) {
+            return
+        }
+        Toggle-FullScreen
+        if ($VirtualKey -eq [ForegroundWinArrowMonitor]::VK_DOWN) {
+            return
+        }
+    }
+
+    $screen = [System.Windows.Forms.Screen]::FromControl($form)
+    switch ($VirtualKey) {
+        ([ForegroundWinArrowMonitor]::VK_LEFT) {
+            Set-WindowSnapMode -Mode "Left" -Screen $screen
+        }
+        ([ForegroundWinArrowMonitor]::VK_RIGHT) {
+            Set-WindowSnapMode -Mode "Right" -Screen $screen
+        }
+        ([ForegroundWinArrowMonitor]::VK_UP) {
+            switch ($script:snapMode) {
+                "Left" { Set-WindowSnapMode -Mode "TopLeft" -Screen $screen }
+                "BottomLeft" { Set-WindowSnapMode -Mode "TopLeft" -Screen $screen }
+                "Right" { Set-WindowSnapMode -Mode "TopRight" -Screen $screen }
+                "BottomRight" { Set-WindowSnapMode -Mode "TopRight" -Screen $screen }
+                "TopLeft" { Set-WindowSnapMode -Mode "Maximized" -Screen $screen }
+                "TopRight" { Set-WindowSnapMode -Mode "Maximized" -Screen $screen }
+                "Maximized" { }
+                default { Set-WindowSnapMode -Mode "Maximized" -Screen $screen }
+            }
+        }
+        ([ForegroundWinArrowMonitor]::VK_DOWN) {
+            switch ($script:snapMode) {
+                "Maximized" { Restore-WindowFromSnap }
+                "TopLeft" { Set-WindowSnapMode -Mode "BottomLeft" -Screen $screen }
+                "Left" { Set-WindowSnapMode -Mode "BottomLeft" -Screen $screen }
+                "TopRight" { Set-WindowSnapMode -Mode "BottomRight" -Screen $screen }
+                "Right" { Set-WindowSnapMode -Mode "BottomRight" -Screen $screen }
+                "BottomLeft" { Restore-WindowFromSnap }
+                "BottomRight" { Restore-WindowFromSnap }
+                default { $form.WindowState = [System.Windows.Forms.FormWindowState]::Minimized }
+            }
+        }
+    }
+}
+
+function Invoke-PendingWinArrowShortcuts {
+    while ($true) {
+        $virtualKey = [ForegroundWinArrowMonitor]::TakePendingKey()
+        if ($virtualKey -eq 0) {
+            return
+        }
+        try {
+            Invoke-WinArrowShortcut -VirtualKey $virtualKey
+        } catch {
+        }
+    }
+}
+
 $formClosed = $false
 $followTailAfterResize = $false
 $f11Held = $false
+$winArrowMonitorInstalled = $false
 $form.Add_FormClosed({ $script:formClosed = $true })
 $form.Add_ResizeBegin({
     $script:followTailAfterResize = (Test-TextDisplayAtBottom) -and $textDisplay.SelectionLength -eq 0
@@ -1622,6 +2110,7 @@ $form.Add_MouseDown({
 })
 $form.Show()
 $form.Activate()
+$winArrowMonitorInstalled = [ForegroundWinArrowMonitor]::Install($form.Handle)
 
 $ownedLiveCaptionsProcessId = 0
 $lastLiveCaptionsStartAttempt = [DateTime]::MinValue
@@ -1747,6 +2236,7 @@ function Resolve-PendingCaptionBeforeCapturedLine {
 try {
     while (-not $formClosed -and -not $form.IsDisposed) {
         [System.Windows.Forms.Application]::DoEvents()
+        Invoke-PendingWinArrowShortcuts
         if ($formClosed -or $form.IsDisposed) {
             break
         }
@@ -1850,6 +2340,12 @@ try {
         Start-Sleep -Milliseconds $PollMilliseconds
     }
 } finally {
+    try {
+        [ForegroundWinArrowMonitor]::Uninstall()
+        $winArrowMonitorInstalled = $false
+    } catch {
+    }
+
     try {
         Flush-PendingCaptionText | Out-Null
         $finalText = Get-TranscriptText -Captured $capturedText -Pending $pendingCaptionText -IncludePending
