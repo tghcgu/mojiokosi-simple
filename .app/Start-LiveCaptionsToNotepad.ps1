@@ -1690,7 +1690,12 @@ function Test-TextDisplayAtBottom {
     $bottomPoint = New-Object System.Drawing.Point(1, ($textDisplay.ClientSize.Height - 2))
     $lastVisibleCharacter = $textDisplay.GetCharIndexFromPosition($bottomPoint)
     $lastVisibleLine = $textDisplay.GetLineFromCharIndex($lastVisibleCharacter)
-    $lastTextLine = $textDisplay.GetLineFromCharIndex($textDisplay.TextLength)
+    $lastContentCharacter = $textDisplay.Text.TrimEnd([char[]]@([char]13, [char]10)).Length - 1
+    if ($lastContentCharacter -lt 0) {
+        return $true
+    }
+
+    $lastTextLine = $textDisplay.GetLineFromCharIndex($lastContentCharacter)
 
     return $lastVisibleLine -ge $lastTextLine
 }
