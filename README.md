@@ -333,7 +333,84 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\.app\Start-LiveCa
 
 ### 保存ファイルが作られない
 
-- プロジ…1092 tokens truncated…ipts`: 利用者の文字起こし保存先。GitHub対象外
+- プロジェクトフォルダーが書き込み可能か確認
+- フォルダーを読み取り専用媒体や保護された場所へ置いていないか確認
+- セキュリティソフトの履歴を確認
+- 手動起動コマンドでエラーを確認
+
+### PowerShellに実行拒否・ブロックが表示される
+
+ダウンロードしたファイルへWindowsのブロックが付いている場合は、プロジェクトフォルダーで次を実行してから、セットアップをやり直します。
+
+```powershell
+Unblock-File .\.app\Install-Shortcuts.ps1
+Unblock-File .\.app\Start-LiveCaptionsToNotepad.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\.app\Install-Shortcuts.ps1
+```
+
+出所を確認できないスクリプトには `Unblock-File` を使わないでください。このリポジトリのURLとダウンロード元を確認してから実行します。
+
+## 保存先を手動で変更する（上級者向け）
+
+デスクトップショートカットを使わずに起動する場合は、`-OutputDirectory` で保存先を指定できます。
+
+```powershell
+powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\.app\Start-LiveCaptionsToNotepad.ps1 -OutputDirectory "D:\Transcripts"
+```
+
+指定先が存在しなければ、作成できる場所では自動作成されます。この指定は、その手動起動にだけ適用されます。通常のデスクトップショートカットは引き続きプロジェクト直下の `transcripts` を使います。
+
+## アンインストール
+
+専用のアンインストーラーはありません。次の順序で削除できます。
+
+1. 文字起こし画面を閉じる
+2. 必要な `transcripts` を別の場所へバックアップ
+3. デスクトップの `文字起こし` ショートカットを削除
+4. 展開した本体フォルダー（`README.md` と `.app` が入っているフォルダー）を削除
+
+このソフトはサービス、スタートアップ項目、スケジュールタスク、専用レジストリ設定を追加しません。Windowsが管理するライブ キャプションの言語ファイルは、この手順では削除されません。
+
+> [!CAUTION]
+> プロジェクトフォルダーを削除すると、中の `transcripts` も一緒に削除されます。先にバックアップを確認してください。
+
+## プライバシーとセキュリティ
+
+- 認識処理はWindowsライブ キャプションが担当
+- 初回セットアップではMicrosoftから言語ファイルをダウンロード
+- 言語ファイル取得後の音声認識は、Microsoftの説明では端末上で処理
+- このソフトは音声を録音ファイルとして保存しない
+- このソフトのスクリプトは音声や文字を外部APIへ送信しない
+- 文字起こし結果は暗号化されていない通常のテキストファイル
+- `transcripts` はGitHubには含まれないが、OS、同期ソフト、バックアップソフト、他のユーザーから見える可能性がある
+
+機密会議、個人情報、医療・法律・金融など重要な内容では、利用組織の規則と保存方針を確認し、必ず原音や公式記録と照合してください。
+
+## 制限事項
+
+- Windowsライブ キャプションの認識精度を超えるものではない
+- 完全な逐語記録や法的な議事録を保証しない
+- 誤認識、欠落、重複、句読点の違いが発生しうる
+- Windows Updateでライブ キャプションの画面構造が変わると、文字取得が動かなくなる可能性がある
+- ライブ キャプションを既に手動利用している場合、アプリ起動時に閉じて再起動することがある
+- 古い文字起こしの自動整理・削除・クラウド同期は行わない
+- ソフトの自動更新機能はない
+
+## フォルダー構成
+
+```text
+mojiokosi-simple\
+├─ .app\
+│  ├─ Install-Shortcuts.ps1
+│  └─ Start-LiveCaptionsToNotepad.ps1
+├─ transcripts\                 # 初回セットアップまたは起動時に作成
+├─ .gitignore
+└─ README.md
+```
+
+- `Install-Shortcuts.ps1`: デスクトップショートカットを作成
+- `Start-LiveCaptionsToNotepad.ps1`: ライブ キャプションの起動、文字取得、画面表示、保存を担当
+- `transcripts`: 利用者の文字起こし保存先。GitHub対象外
 
 ## 困った時
 
