@@ -29,7 +29,8 @@ Mojiokosi Simple displays text recognized by Windows 11 Live Captions in a clean
 - 文字だけを表示する、黒背景のシンプルな画面
 - 見えるボタンは閉じる `×` だけ
 - ウィンドウの移動、自由なサイズ変更、半分・4分の1へのスナップに対応
-- `Win + 矢印`、全画面表示、スクロール、文字選択・コピーに対応
+- `Win + 矢印`、複数モニター間の移動、縦長画面向け配置に対応
+- 全画面表示、スクロール、文字選択・コピーに対応
 - 常に最前面には固定されず、ブラウザなどの後ろにも移動可能
 - 文字起こしを起動ごとに別の UTF-8 テキストへ自動保存
 - API キー、Python、Node.js、外部の文字起こしサービスは不要
@@ -159,8 +160,9 @@ Windows 11 の **ターミナルで開く** を使って、そのフォルダー
 | --- | --- |
 | ウィンドウを移動 | 画面上部または外側の空いている余白をドラッグ |
 | 自由にサイズ変更 | 四辺または四隅をドラッグ |
-| 左右半分に配置 | 上部の余白を画面の左端・右端へドラッグ、または `Win + ← / →` |
-| 4分の1に配置 | 上部の余白を画面の四隅へドラッグ、または左右半分の後に `Win + ↑ / ↓` |
+| 左右半分に配置・隣の画面へ進む | 上部の余白を画面の左端・右端へドラッグ、または `Win + ← / →`。同じ方向を繰り返すと、画面の端から隣接モニターへ進む |
+| 配置をできるだけ保って隣の画面へ直接移動 | `Win + Shift + ← / →`。縦横の向きが異なる場合は、移動方向と移動先に合う配置へ自動調整 |
+| 4分の1に配置 | 上部の余白を画面の四隅へドラッグ、または左右半分の後に `Win + ↑ / ↓`。縦長画面では細くなりすぎないよう、全幅の上半分・下半分になる |
 | 最大化 | 上部の余白を画面上端中央へドラッグ、または `Win + ↑` |
 | 元のサイズへ戻す | スナップ中に上部の余白を画面中央へドラッグ。キー操作では、最大表示なら `Win + ↓`、左右半分・4分の1なら状態に応じて `Win + ↓` を繰り返す |
 | 全画面表示 | `F11`、または上部の余白をダブルクリック。同じ操作で元に戻る |
@@ -169,7 +171,9 @@ Windows 11 の **ターミナルで開く** を使って、そのフォルダー
 | 文字をコピー | 文字を選択して `Ctrl + C` |
 | 終了 | 右上の `×`、`Esc`、または `Alt + F4` |
 
-`Win + 矢印` は、文字起こし画面が選択されている時に動作します。左右どちらの Windows キーでも使えます。
+`Win + 矢印` は、文字起こし画面が選択されている時に動作します。左右どちらの Windows キーでも使えます。モニターはWindows上の座標と位置関係から選ばれるため、左右の高さがずれた配置や解像度の異なる画面にも対応します。隣のモニターがない方向では、現在の画面端に留まります。
+
+横長モニターでは四隅が4分の1表示になります。縦長モニターでは、四隅へのドラッグ、または左右半分からの `Win + ↑ / ↓` が全幅の上半分・下半分になり、文字欄が細長くなりすぎるのを防ぎます。左右半分の配置も引き続き使用できます。高い表示倍率などで画面が非常に細く、最小サイズを保ったまま分割できない場合は、画面外にはみ出さない配置へ自動的に切り替わります。
 
 最新行を見ている間は、新しい文字へ自動で追従します。上へスクロールして過去の行を読んでいる間や文字を選択している間は、可能な限り表示位置と選択範囲を保ちます。
 
@@ -329,84 +333,7 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\.app\Start-LiveCa
 
 ### 保存ファイルが作られない
 
-- プロジェクトフォルダーが書き込み可能か確認
-- フォルダーを読み取り専用媒体や保護された場所へ置いていないか確認
-- セキュリティソフトの履歴を確認
-- 手動起動コマンドでエラーを確認
-
-### PowerShellに実行拒否・ブロックが表示される
-
-ダウンロードしたファイルへWindowsのブロックが付いている場合は、プロジェクトフォルダーで次を実行してから、セットアップをやり直します。
-
-```powershell
-Unblock-File .\.app\Install-Shortcuts.ps1
-Unblock-File .\.app\Start-LiveCaptionsToNotepad.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\.app\Install-Shortcuts.ps1
-```
-
-出所を確認できないスクリプトには `Unblock-File` を使わないでください。このリポジトリのURLとダウンロード元を確認してから実行します。
-
-## 保存先を手動で変更する（上級者向け）
-
-デスクトップショートカットを使わずに起動する場合は、`-OutputDirectory` で保存先を指定できます。
-
-```powershell
-powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\.app\Start-LiveCaptionsToNotepad.ps1 -OutputDirectory "D:\Transcripts"
-```
-
-指定先が存在しなければ、作成できる場所では自動作成されます。この指定は、その手動起動にだけ適用されます。通常のデスクトップショートカットは引き続きプロジェクト直下の `transcripts` を使います。
-
-## アンインストール
-
-専用のアンインストーラーはありません。次の順序で削除できます。
-
-1. 文字起こし画面を閉じる
-2. 必要な `transcripts` を別の場所へバックアップ
-3. デスクトップの `文字起こし` ショートカットを削除
-4. 展開した本体フォルダー（`README.md` と `.app` が入っているフォルダー）を削除
-
-このソフトはサービス、スタートアップ項目、スケジュールタスク、専用レジストリ設定を追加しません。Windowsが管理するライブ キャプションの言語ファイルは、この手順では削除されません。
-
-> [!CAUTION]
-> プロジェクトフォルダーを削除すると、中の `transcripts` も一緒に削除されます。先にバックアップを確認してください。
-
-## プライバシーとセキュリティ
-
-- 認識処理はWindowsライブ キャプションが担当
-- 初回セットアップではMicrosoftから言語ファイルをダウンロード
-- 言語ファイル取得後の音声認識は、Microsoftの説明では端末上で処理
-- このソフトは音声を録音ファイルとして保存しない
-- このソフトのスクリプトは音声や文字を外部APIへ送信しない
-- 文字起こし結果は暗号化されていない通常のテキストファイル
-- `transcripts` はGitHubには含まれないが、OS、同期ソフト、バックアップソフト、他のユーザーから見える可能性がある
-
-機密会議、個人情報、医療・法律・金融など重要な内容では、利用組織の規則と保存方針を確認し、必ず原音や公式記録と照合してください。
-
-## 制限事項
-
-- Windowsライブ キャプションの認識精度を超えるものではない
-- 完全な逐語記録や法的な議事録を保証しない
-- 誤認識、欠落、重複、句読点の違いが発生しうる
-- Windows Updateでライブ キャプションの画面構造が変わると、文字取得が動かなくなる可能性がある
-- ライブ キャプションを既に手動利用している場合、アプリ起動時に閉じて再起動することがある
-- 古い文字起こしの自動整理・削除・クラウド同期は行わない
-- ソフトの自動更新機能はない
-
-## フォルダー構成
-
-```text
-mojiokosi-simple\
-├─ .app\
-│  ├─ Install-Shortcuts.ps1
-│  └─ Start-LiveCaptionsToNotepad.ps1
-├─ transcripts\                 # 初回セットアップまたは起動時に作成
-├─ .gitignore
-└─ README.md
-```
-
-- `Install-Shortcuts.ps1`: デスクトップショートカットを作成
-- `Start-LiveCaptionsToNotepad.ps1`: ライブ キャプションの起動、文字取得、画面表示、保存を担当
-- `transcripts`: 利用者の文字起こし保存先。GitHub対象外
+- プロジ…1092 tokens truncated…ipts`: 利用者の文字起こし保存先。GitHub対象外
 
 ## 困った時
 
@@ -436,7 +363,8 @@ Key features:
 - Shows a clean text-only window with a black background
 - Displays only one button: close `×`
 - Supports moving, free resizing, half-screen snapping, and quarter-screen snapping
-- Supports `Win + Arrow`, full screen, scrolling, text selection, and copying
+- Supports `Win + Arrow`, movement across monitors, and portrait-aware layouts
+- Supports full screen, scrolling, text selection, and copying
 - Is not forced always-on-top, so browsers and other apps can cover it
 - Saves each launch to a separate UTF-8 text file
 - Requires no API key, Python, Node.js, or external transcription service
@@ -566,8 +494,9 @@ Only one transcription window can run at a time. Opening the shortcut again whil
 | --- | --- |
 | Move the window | Drag the empty top or outer margin |
 | Resize freely | Drag any edge or corner |
-| Snap to left or right half | Drag the top margin to the left or right screen edge, or press `Win + Left / Right` |
-| Snap to a quarter | Drag the top margin to a screen corner, or press `Win + Up / Down` after snapping left or right |
+| Snap to a half or continue to another monitor | Drag the top margin to the left or right edge, or press `Win + Left / Right`. Repeating the same direction continues from the outer edge onto the adjacent monitor |
+| Move directly to another monitor and preserve the layout as closely as possible | Press `Win + Shift + Left / Right`. If the displays have different orientations, the layout is adapted to the movement direction and destination |
+| Snap to a quarter | Drag the top margin to a screen corner, or press `Win + Up / Down` after snapping left or right. On a portrait monitor, this becomes a full-width top or bottom half so the text area is not too narrow |
 | Maximize | Drag the top margin to the top-center edge, or press `Win + Up` |
 | Restore the previous size | Drag the top margin from a snapped window toward the center. With the keyboard, press `Win + Down` once from maximized mode, or repeat it as needed from a half or quarter position |
 | Enter or leave full screen | Press `F11` or double-click the top margin |
@@ -576,7 +505,9 @@ Only one transcription window can run at a time. Opening the shortcut again whil
 | Copy text | Select text and press `Ctrl + C` |
 | Exit | Click `×`, press `Esc`, or press `Alt + F4` |
 
-`Win + Arrow` works while the transcription window is focused. Either the left or right Windows key can be used.
+`Win + Arrow` works while the transcription window is focused. Either the left or right Windows key can be used. Monitors are selected from their actual Windows coordinates, so layouts with vertically offset or different-resolution displays are supported. At an outer edge with no adjacent monitor, the window stays on that edge.
+
+On a landscape monitor, the four corners produce quarter-screen layouts. On a portrait monitor, dragging to a corner or pressing `Win + Up / Down` from a left/right half produces a full-width top or bottom half, avoiding an excessively narrow text column. Left and right halves remain available. If high display scaling makes a screen too narrow to preserve the minimum window size in a split, the app automatically falls back to a layout that stays on-screen.
 
 When you are at the bottom, the view follows new text automatically. While you are reading older lines or selecting text, the app tries to preserve the scroll position and selection.
 
