@@ -115,6 +115,7 @@ public static class NativeWindowTools
     public const uint SWP_NOZORDER = 0x0004;
     public const uint SWP_NOACTIVATE = 0x0010;
     public const uint SWP_FRAMECHANGED = 0x0020;
+    public const uint WM_SETREDRAW = 0x000B;
     public const uint WM_CLOSE = 0x0010;
     public const uint WM_NCLBUTTONDOWN = 0x00A1;
     public const int HTCAPTION = 0x0002;
@@ -1718,30 +1719,51 @@ function Set-TranscriptDisplayText {
     )
 
     $displayText = Get-TranscriptDisplayTextWithBottomPadding -Text $Text
+    $textDisplayHandle = $textDisplay.Handle
+    $redrawSuspended = $false
 
-    if (-not $PreserveUserScroll) {
+    if ($PreserveUserScroll) {
+        $wasAtBottom = (Test-TextDisplayAtBottom) -and $textDisplay.SelectionLength -eq 0
+        $scrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplayHandle)
+        $selectionStart = $textDisplay.SelectionStart
+        $selectionLength = $textDisplay.SelectionLength
+    }
+
+    try {
+        [NativeWindowTools]::SendMessage(
+            $textDisplayHandle,
+            [NativeWindowTools]::WM_SETREDRAW,
+            [IntPtr]::Zero,
+            [IntPtr]::Zero
+        ) | Out-Null
+        $redrawSuspended = $true
+
         $textDisplay.Text = $displayText
-        return
+
+        if ($PreserveUserScroll) {
+            if ($wasAtBottom) {
+                $textDisplay.SelectionStart = $textDisplay.TextLength
+                $textDisplay.SelectionLength = 0
+                $textDisplay.ScrollToCaret()
+            } else {
+                $selectionStart = [Math]::Min($selectionStart, $textDisplay.TextLength)
+                $selectionLength = [Math]::Min($selectionLength, $textDisplay.TextLength - $selectionStart)
+                $textDisplay.Select($selectionStart, $selectionLength)
+                [NativeWindowTools]::SetRichEditScrollY($textDisplayHandle, $scrollY)
+            }
+        }
+    } finally {
+        if ($redrawSuspended) {
+            [NativeWindowTools]::SendMessage(
+                $textDisplayHandle,
+                [NativeWindowTools]::WM_SETREDRAW,
+                [IntPtr]1,
+                [IntPtr]::Zero
+            ) | Out-Null
+            $textDisplay.Invalidate()
+            $textDisplay.Update()
+        }
     }
-
-    $wasAtBottom = (Test-TextDisplayAtBottom) -and $textDisplay.SelectionLength -eq 0
-    $scrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplay.Handle)
-    $selectionStart = $textDisplay.SelectionStart
-    $selectionLength = $textDisplay.SelectionLength
-
-    $textDisplay.Text = $displayText
-
-    if ($wasAtBottom) {
-        $textDisplay.SelectionStart = $textDisplay.TextLength
-        $textDisplay.SelectionLength = 0
-        $textDisplay.ScrollToCaret()
-        return
-    }
-
-    $selectionStart = [Math]::Min($selectionStart, $textDisplay.TextLength)
-    $selectionLength = [Math]::Min($selectionLength, $textDisplay.TextLength - $selectionStart)
-    $textDisplay.Select($selectionStart, $selectionLength)
-    [NativeWindowTools]::SetRichEditScrollY($textDisplay.Handle, $scrollY)
 }
 
 $isFullScreen = $false
