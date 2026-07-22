@@ -1597,7 +1597,7 @@ $windowTitle = ConvertFrom-Utf8Base64 "5paH5a2X6LW344GT44GX"
 $setupText = ConvertFrom-Utf8Base64 "V2luZG93cyDjg6njgqTjg5Yg44Kt44Oj44OX44K344On44Oz44Gu5Yid5pyf6Kit5a6a44KS5a6M5LqG44GX44Gm44GP44Gg44GV44GE"
 $startFailureText = ConvertFrom-Utf8Base64 "V2luZG93cyDjg6njgqTjg5Yg44Kt44Oj44OX44K344On44Oz44KS6ZaL5aeL44Gn44GN44G+44Gb44KT"
 
-$backgroundColor = [System.Drawing.Color]::FromArgb(18, 18, 20)
+$backgroundColor = [System.Drawing.Color]::FromArgb(0, 0, 0)
 $foregroundColor = [System.Drawing.Color]::FromArgb(245, 245, 245)
 $form = New-Object System.Windows.Forms.Form
 $form.Text = $windowTitle
