@@ -1695,14 +1695,27 @@ function Test-TextDisplayAtBottom {
     return $lastVisibleLine -ge $lastTextLine
 }
 
+function Get-TranscriptDisplayTextWithBottomPadding {
+    param([string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) {
+        return $Text
+    }
+
+    $lineBreakCharacters = [char[]]@([char]13, [char]10)
+    return $Text.TrimEnd($lineBreakCharacters) + [Environment]::NewLine
+}
+
 function Set-TranscriptDisplayText {
     param(
         [string]$Text,
         [switch]$PreserveUserScroll
     )
 
+    $displayText = Get-TranscriptDisplayTextWithBottomPadding -Text $Text
+
     if (-not $PreserveUserScroll) {
-        $textDisplay.Text = $Text
+        $textDisplay.Text = $displayText
         return
     }
 
@@ -1711,7 +1724,7 @@ function Set-TranscriptDisplayText {
     $selectionStart = $textDisplay.SelectionStart
     $selectionLength = $textDisplay.SelectionLength
 
-    $textDisplay.Text = $Text
+    $textDisplay.Text = $displayText
 
     if ($wasAtBottom) {
         $textDisplay.SelectionStart = $textDisplay.TextLength
