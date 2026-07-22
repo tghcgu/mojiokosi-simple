@@ -106,6 +106,50 @@ public static class NativeWindowTools
         SendMessagePoint(hWnd, EM_SETSCROLLPOS, IntPtr.Zero, ref point);
     }
 
+    public static int[] GetTextChangeRange(string oldText, string newText)
+    {
+        oldText = oldText ?? String.Empty;
+        newText = newText ?? String.Empty;
+
+        int commonLength = Math.Min(oldText.Length, newText.Length);
+        int prefixLength = 0;
+        while (prefixLength < commonLength && oldText[prefixLength] == newText[prefixLength])
+        {
+            prefixLength++;
+        }
+
+        if (prefixLength > 0 &&
+            ((prefixLength < oldText.Length && Char.IsLowSurrogate(oldText[prefixLength])) ||
+             (prefixLength < newText.Length && Char.IsLowSurrogate(newText[prefixLength]))))
+        {
+            prefixLength--;
+        }
+
+        int suffixLength = 0;
+        while (suffixLength < oldText.Length - prefixLength &&
+               suffixLength < newText.Length - prefixLength &&
+               oldText[oldText.Length - 1 - suffixLength] == newText[newText.Length - 1 - suffixLength])
+        {
+            suffixLength++;
+        }
+
+        int oldSuffixStart = oldText.Length - suffixLength;
+        int newSuffixStart = newText.Length - suffixLength;
+        if (suffixLength > 0 &&
+            ((oldSuffixStart < oldText.Length && Char.IsLowSurrogate(oldText[oldSuffixStart])) ||
+             (newSuffixStart < newText.Length && Char.IsLowSurrogate(newText[newSuffixStart]))))
+        {
+            suffixLength--;
+        }
+
+        return new int[]
+        {
+            prefixLength,
+            oldText.Length - prefixLength - suffixLength,
+            newText.Length - prefixLength - suffixLength
+        };
+    }
+
     public const byte VK_LWIN = 0x5B;
     public const byte VK_CONTROL = 0x11;
     public const byte VK_L = 0x4C;
@@ -115,7 +159,6 @@ public static class NativeWindowTools
     public const uint SWP_NOZORDER = 0x0004;
     public const uint SWP_NOACTIVATE = 0x0010;
     public const uint SWP_FRAMECHANGED = 0x0020;
-    public const uint WM_SETREDRAW = 0x000B;
     public const uint WM_CLOSE = 0x0010;
     public const uint WM_NCLBUTTONDOWN = 0x00A1;
     public const int HTCAPTION = 0x0002;
@@ -1691,7 +1734,8 @@ function Test-TextDisplayAtBottom {
     $bottomPoint = New-Object System.Drawing.Point(1, ($textDisplay.ClientSize.Height - 2))
     $lastVisibleCharacter = $textDisplay.GetCharIndexFromPosition($bottomPoint)
     $lastVisibleLine = $textDisplay.GetLineFromCharIndex($lastVisibleCharacter)
-    $lastContentCharacter = $textDisplay.Text.TrimEnd([char[]]@([char]13, [char]10)).Length - 1
+    $internalText = ConvertTo-RichTextBoxInternalText -Text $textDisplay.Text
+    $lastContentCharacter = $internalText.TrimEnd([char[]]@([char]10)).Length - 1
     if ($lastContentCharacter -lt 0) {
         return $true
     }
@@ -1699,6 +1743,127 @@ function Test-TextDisplayAtBottom {
     $lastTextLine = $textDisplay.GetLineFromCharIndex($lastContentCharacter)
 
     return $lastVisibleLine -ge $lastTextLine
+}
+
+function ConvertTo-RichTextBoxInternalText {
+    param([string]$Text)
+
+    if ($null -eq $Text) {
+        return ""
+    }
+
+    return $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+}
+
+function Convert-TextPositionAfterDisplayChange {
+    param(
+        [int]$Position,
+        [int]$ChangeStart,
+        [int]$OldLength,
+        [int]$NewLength
+    )
+
+    if ($Position -le $ChangeStart) {
+        return $Position
+    }
+
+    $oldChangeEnd = $ChangeStart + $OldLength
+    if ($Position -ge $oldChangeEnd) {
+        return $Position + $NewLength - $OldLength
+    }
+
+    return $ChangeStart + [Math]::Min($Position - $ChangeStart, $NewLength)
+}
+
+function Test-TextDisplayTailFullyVisible {
+    if ($textDisplay.TextLength -eq 0 -or $textDisplay.ClientSize.Height -le 2) {
+        return $true
+    }
+
+    $anchorIndex = $textDisplay.TextLength
+    $anchorPosition = $textDisplay.GetPositionFromCharIndex($anchorIndex)
+    if ($anchorPosition.Y -gt ($textDisplay.ClientSize.Height - 2)) {
+        return $false
+    }
+
+    $anchorLine = $textDisplay.GetLineFromCharIndex($anchorIndex)
+    if ($anchorLine -le 0) {
+        return $anchorPosition.Y -ge 0
+    }
+
+    $lastVisibleRowStart = $textDisplay.GetFirstCharIndexFromLine($anchorLine - 1)
+    if ($lastVisibleRowStart -lt 0) {
+        return $false
+    }
+
+    $lastVisibleRowPosition = $textDisplay.GetPositionFromCharIndex($lastVisibleRowStart)
+    return $lastVisibleRowPosition.Y -ge 0
+}
+
+function Set-TextDisplayTailVisible {
+    param([int]$PreferredScrollY)
+
+    $selectionStart = $textDisplay.SelectionStart
+    $selectionLength = $textDisplay.SelectionLength
+    if ($textDisplay.TextLength -eq 0 -or $textDisplay.ClientSize.Height -le 2) {
+        return
+    }
+
+    $anchorIndex = $textDisplay.TextLength
+    $currentScrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplay.Handle)
+    if ($PreferredScrollY -gt 30000 -or $currentScrollY -gt 30000) {
+        if (-not (Test-TextDisplayTailFullyVisible)) {
+            $textDisplay.Select($anchorIndex, 0)
+            $textDisplay.ScrollToCaret()
+        }
+        return
+    }
+
+    [NativeWindowTools]::SetRichEditScrollY($textDisplay.Handle, $PreferredScrollY)
+    $anchorPosition = $textDisplay.GetPositionFromCharIndex($anchorIndex)
+    $visibleBottom = $textDisplay.ClientSize.Height - 2
+
+    if ($anchorPosition.Y -gt 30000) {
+        $textDisplay.Select($anchorIndex, 0)
+        $textDisplay.ScrollToCaret()
+        return
+    }
+
+    if ($anchorPosition.Y -gt $visibleBottom) {
+        $currentScrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplay.Handle)
+        [NativeWindowTools]::SetRichEditScrollY(
+            $textDisplay.Handle,
+            ($currentScrollY + $anchorPosition.Y - $visibleBottom)
+        )
+
+        $anchorPosition = $textDisplay.GetPositionFromCharIndex($anchorIndex)
+        if ($anchorPosition.Y -gt $visibleBottom) {
+            $textDisplay.Select($anchorIndex, 0)
+            $textDisplay.ScrollToCaret()
+            $tailScrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplay.Handle)
+            $textDisplay.Select($selectionStart, $selectionLength)
+            [NativeWindowTools]::SetRichEditScrollY($textDisplay.Handle, $tailScrollY)
+        }
+    }
+
+    $anchorLine = $textDisplay.GetLineFromCharIndex($anchorIndex)
+    if ($anchorLine -le 0) {
+        return
+    }
+
+    $lastVisibleRowStart = $textDisplay.GetFirstCharIndexFromLine($anchorLine - 1)
+    if ($lastVisibleRowStart -lt 0) {
+        return
+    }
+
+    $lastVisibleRowPosition = $textDisplay.GetPositionFromCharIndex($lastVisibleRowStart)
+    if ($lastVisibleRowPosition.Y -lt 0) {
+        $currentScrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplay.Handle)
+        [NativeWindowTools]::SetRichEditScrollY(
+            $textDisplay.Handle,
+            [Math]::Max(0, ($currentScrollY + $lastVisibleRowPosition.Y))
+        )
+    }
 }
 
 function Get-TranscriptDisplayTextWithBottomPadding {
@@ -1719,50 +1884,51 @@ function Set-TranscriptDisplayText {
     )
 
     $displayText = Get-TranscriptDisplayTextWithBottomPadding -Text $Text
+    $newInternalText = ConvertTo-RichTextBoxInternalText -Text $displayText
+    $oldInternalText = ConvertTo-RichTextBoxInternalText -Text $textDisplay.Text
     $textDisplayHandle = $textDisplay.Handle
-    $redrawSuspended = $false
+    $wasAtBottom = $PreserveUserScroll -and
+        (Test-TextDisplayAtBottom) -and
+        $textDisplay.SelectionLength -eq 0
+    $scrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplayHandle)
+    $selectionStart = $textDisplay.SelectionStart
+    $selectionEnd = $selectionStart + $textDisplay.SelectionLength
 
-    if ($PreserveUserScroll) {
-        $wasAtBottom = (Test-TextDisplayAtBottom) -and $textDisplay.SelectionLength -eq 0
-        $scrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplayHandle)
-        $selectionStart = $textDisplay.SelectionStart
-        $selectionLength = $textDisplay.SelectionLength
+    $changeRange = [NativeWindowTools]::GetTextChangeRange($oldInternalText, $newInternalText)
+    $changeStart = $changeRange[0]
+    $oldChangeLength = $changeRange[1]
+    $newChangeLength = $changeRange[2]
+
+    if ($oldChangeLength -gt 0 -or $newChangeLength -gt 0) {
+        $replacementText = $newInternalText.Substring($changeStart, $newChangeLength)
+        $textDisplay.Select($changeStart, $oldChangeLength)
+        $textDisplay.SelectedText = $replacementText
+        $textDisplay.ClearUndo()
     }
 
-    try {
-        [NativeWindowTools]::SendMessage(
-            $textDisplayHandle,
-            [NativeWindowTools]::WM_SETREDRAW,
-            [IntPtr]::Zero,
-            [IntPtr]::Zero
-        ) | Out-Null
-        $redrawSuspended = $true
+    if (-not $wasAtBottom) {
+        $selectionStart = Convert-TextPositionAfterDisplayChange `
+            -Position $selectionStart `
+            -ChangeStart $changeStart `
+            -OldLength $oldChangeLength `
+            -NewLength $newChangeLength
+        $selectionEnd = Convert-TextPositionAfterDisplayChange `
+            -Position $selectionEnd `
+            -ChangeStart $changeStart `
+            -OldLength $oldChangeLength `
+            -NewLength $newChangeLength
 
-        $textDisplay.Text = $displayText
+        $selectionStart = [Math]::Max(0, [Math]::Min($selectionStart, $textDisplay.TextLength))
+        $selectionEnd = [Math]::Max($selectionStart, [Math]::Min($selectionEnd, $textDisplay.TextLength))
+        $textDisplay.Select($selectionStart, ($selectionEnd - $selectionStart))
+    }
 
-        if ($PreserveUserScroll) {
-            if ($wasAtBottom) {
-                $textDisplay.SelectionStart = $textDisplay.TextLength
-                $textDisplay.SelectionLength = 0
-                $textDisplay.ScrollToCaret()
-            } else {
-                $selectionStart = [Math]::Min($selectionStart, $textDisplay.TextLength)
-                $selectionLength = [Math]::Min($selectionLength, $textDisplay.TextLength - $selectionStart)
-                $textDisplay.Select($selectionStart, $selectionLength)
-                [NativeWindowTools]::SetRichEditScrollY($textDisplayHandle, $scrollY)
-            }
-        }
-    } finally {
-        if ($redrawSuspended) {
-            [NativeWindowTools]::SendMessage(
-                $textDisplayHandle,
-                [NativeWindowTools]::WM_SETREDRAW,
-                [IntPtr]1,
-                [IntPtr]::Zero
-            ) | Out-Null
-            $textDisplay.Invalidate()
-            $textDisplay.Update()
-        }
+    if (-not $PreserveUserScroll) {
+        [NativeWindowTools]::SetRichEditScrollY($textDisplayHandle, 0)
+    } elseif ($wasAtBottom) {
+        Set-TextDisplayTailVisible -PreferredScrollY $scrollY
+    } else {
+        [NativeWindowTools]::SetRichEditScrollY($textDisplayHandle, $scrollY)
     }
 }
 
@@ -2797,6 +2963,27 @@ function Resolve-PendingCaptionBeforeCapturedLine {
     return (Flush-PendingCaptionText)
 }
 
+function Wait-ForNextTranscriptPoll {
+    param([int]$Milliseconds)
+
+    $waitTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($waitTimer.ElapsedMilliseconds -lt $Milliseconds -and
+        -not $script:formClosed -and
+        -not $form.IsDisposed) {
+        [System.Windows.Forms.Application]::DoEvents()
+        if ($script:formClosed -or $form.IsDisposed) {
+            break
+        }
+
+        Invoke-PendingWinArrowShortcuts | Out-Null
+
+        $remainingMilliseconds = $Milliseconds - $waitTimer.ElapsedMilliseconds
+        if ($remainingMilliseconds -gt 0) {
+            Start-Sleep -Milliseconds ([Math]::Min(15, [Math]::Max(1, $remainingMilliseconds)))
+        }
+    }
+}
+
 try {
     while (-not $formClosed -and -not $form.IsDisposed) {
         [System.Windows.Forms.Application]::DoEvents()
@@ -2833,7 +3020,7 @@ try {
                 $lastDisplayedText = $statusText
             }
 
-            Start-Sleep -Milliseconds $PollMilliseconds
+            Wait-ForNextTranscriptPoll -Milliseconds $PollMilliseconds
             continue
         }
 
@@ -2849,7 +3036,7 @@ try {
                 $textDisplay.Text = $setupText
                 $lastDisplayedText = $setupText
             }
-            Start-Sleep -Milliseconds $PollMilliseconds
+            Wait-ForNextTranscriptPoll -Milliseconds $PollMilliseconds
             continue
         }
 
@@ -2877,13 +3064,13 @@ try {
                 $textDisplay.Text = $waitingText
                 $lastDisplayedText = $waitingText
             }
-            Start-Sleep -Milliseconds $PollMilliseconds
+            Wait-ForNextTranscriptPoll -Milliseconds $PollMilliseconds
             continue
         }
 
         $snapshotLines = @(Split-CaptionLines $snapshot)
         if ($snapshotLines.Count -eq 0) {
-            Start-Sleep -Milliseconds $PollMilliseconds
+            Wait-ForNextTranscriptPoll -Milliseconds $PollMilliseconds
             continue
         }
 
@@ -2901,7 +3088,7 @@ try {
         }
 
         $lastSnapshot = $snapshot
-        Start-Sleep -Milliseconds $PollMilliseconds
+        Wait-ForNextTranscriptPoll -Milliseconds $PollMilliseconds
     }
 } finally {
     try {
