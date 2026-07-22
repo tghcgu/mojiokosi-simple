@@ -177,6 +177,8 @@ Windows 11 の **ターミナルで開く** を使って、そのフォルダー
 
 最新行を見ている間は、新しい文字へ自動で追従します。上へスクロールして過去の行を読んでいる間や文字を選択している間は、可能な限り表示位置と選択範囲を保ちます。
 
+最新行の下には表示専用の1行分の余白を確保し、一番下の文字が途中で切れないようにします。この余白は保存される文字起こしファイルには入りません。
+
 この画面は常に最前面ではありません。ブラウザなど別のアプリをクリックするか `Alt + Tab` で切り替えると、そのアプリの後ろへ移動します。複数モニターでも使用できます。
 
 ## 保存されるファイル
@@ -587,6 +589,8 @@ Only one transcription window can run at a time. Opening the shortcut again whil
 On a landscape monitor, the four corners produce quarter-screen layouts. On a portrait monitor, dragging to a corner or pressing `Win + Up / Down` from a left/right half produces a full-width top or bottom half, avoiding an excessively narrow text column. Left and right halves remain available. If high display scaling makes a screen too narrow to preserve the minimum window size in a split, the app automatically falls back to a layout that stays on-screen.
 
 When you are at the bottom, the view follows new text automatically. While you are reading older lines or selecting text, the app tries to preserve the scroll position and selection.
+
+The app keeps one display-only line of space below the newest text so the bottom line remains fully visible. This space is not written to the saved transcript file.
 
 The window is not always-on-top. Click another app or use `Alt + Tab` to place a browser or another window in front of it. Multiple monitors are supported.
 
