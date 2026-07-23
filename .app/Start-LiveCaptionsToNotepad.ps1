@@ -25,20 +25,26 @@ Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-Add-Type @"
+Add-Type -ReferencedAssemblies "System.Windows.Forms" -TypeDefinition @"
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Windows.Forms;
 
 public static class NativeWindowTools
 {
     [StructLayout(LayoutKind.Sequential)]
-    private struct NativePoint
+    private struct ScrollInfo
     {
-        public int X;
-        public int Y;
+        public uint Size;
+        public uint Mask;
+        public int Minimum;
+        public int Maximum;
+        public uint PageSize;
+        public int Position;
+        public int TrackPosition;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -54,19 +60,7 @@ public static class NativeWindowTools
     public static extern bool SetForegroundWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
-    public static extern bool IsWindow(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    public static extern IntPtr GetForegroundWindow();
-
-    [DllImport("user32.dll")]
-    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-
-    [DllImport("user32.dll")]
     public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
-
-    [DllImport("user32.dll")]
-    public static extern short GetAsyncKeyState(int vKey);
 
     [DllImport("user32.dll")]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
@@ -89,21 +83,58 @@ public static class NativeWindowTools
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
 
-    [DllImport("user32.dll", EntryPoint = "SendMessage")]
-    private static extern IntPtr SendMessagePoint(IntPtr hWnd, uint message, IntPtr wParam, ref NativePoint lParam);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetScrollInfo(IntPtr hWnd, int scrollBar, ref ScrollInfo scrollInfo);
 
-    public static int GetRichEditScrollY(IntPtr hWnd)
+    public static bool IsRichEditAtBottom(IntPtr hWnd)
     {
-        NativePoint point = new NativePoint();
-        SendMessagePoint(hWnd, EM_GETSCROLLPOS, IntPtr.Zero, ref point);
-        return point.Y;
+        if (hWnd == IntPtr.Zero)
+        {
+            return true;
+        }
+
+        ScrollInfo info = new ScrollInfo();
+        info.Size = (uint)Marshal.SizeOf(typeof(ScrollInfo));
+        info.Mask = SIF_RANGE | SIF_PAGE | SIF_POS;
+        if (!GetScrollInfo(hWnd, SB_VERT, ref info))
+        {
+            return true;
+        }
+
+        int pageSize = info.PageSize > Int32.MaxValue ? Int32.MaxValue : (int)info.PageSize;
+        int maximumPosition = Math.Max(
+            info.Minimum,
+            info.Maximum - Math.Max(pageSize - 1, 0)
+        );
+        return info.Position >= maximumPosition - 1;
     }
 
-    public static void SetRichEditScrollY(IntPtr hWnd, int y)
+    public static void ScrollRichEditToBottom(IntPtr hWnd)
     {
-        NativePoint point = new NativePoint();
-        point.Y = Math.Max(0, y);
-        SendMessagePoint(hWnd, EM_SETSCROLLPOS, IntPtr.Zero, ref point);
+        if (hWnd != IntPtr.Zero)
+        {
+            SendMessage(hWnd, WM_VSCROLL, new IntPtr(SB_BOTTOM), IntPtr.Zero);
+        }
+    }
+
+    public static void SetRichEditFirstVisibleLine(IntPtr hWnd, int targetLine)
+    {
+        if (hWnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        int currentLine = unchecked((int)SendMessage(
+            hWnd,
+            EM_GETFIRSTVISIBLELINE,
+            IntPtr.Zero,
+            IntPtr.Zero
+        ).ToInt64());
+        int lineDelta = Math.Max(0, targetLine) - currentLine;
+        if (lineDelta != 0)
+        {
+            SendMessage(hWnd, EM_LINESCROLL, IntPtr.Zero, new IntPtr(lineDelta));
+        }
     }
 
     public static int[] GetTextChangeRange(string oldText, string newText)
@@ -153,7 +184,6 @@ public static class NativeWindowTools
     public const byte VK_LWIN = 0x5B;
     public const byte VK_CONTROL = 0x11;
     public const byte VK_L = 0x4C;
-    public const int VK_LBUTTON = 0x01;
     public const uint KEYEVENTF_KEYUP = 0x0002;
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOZORDER = 0x0004;
@@ -173,8 +203,57 @@ public static class NativeWindowTools
     public const int GWL_EXSTYLE = -20;
     public const int WS_EX_TOOLWINDOW = 0x00000080;
     public const int WS_EX_APPWINDOW = 0x00040000;
-    private const uint EM_GETSCROLLPOS = 0x04DD;
-    private const uint EM_SETSCROLLPOS = 0x04DE;
+    private const uint EM_GETFIRSTVISIBLELINE = 0x00CE;
+    private const uint EM_LINESCROLL = 0x00B6;
+    private const uint WM_VSCROLL = 0x0115;
+    private const int SB_VERT = 1;
+    private const int SB_BOTTOM = 7;
+    private const uint SIF_RANGE = 0x0001;
+    private const uint SIF_PAGE = 0x0002;
+    private const uint SIF_POS = 0x0004;
+}
+
+public sealed class TranscriptRichTextBox : RichTextBox
+{
+    public event EventHandler UserScrollChanged;
+
+    protected override void WndProc(ref Message message)
+    {
+        bool isUserScroll = message.Msg == WM_MOUSEWHEEL ||
+            message.Msg == WM_VSCROLL ||
+            (message.Msg == WM_KEYDOWN && IsScrollKey(unchecked((int)message.WParam.ToInt64())));
+
+        base.WndProc(ref message);
+
+        if (isUserScroll)
+        {
+            EventHandler handler = UserScrollChanged;
+            if (handler != null)
+            {
+                handler(this, EventArgs.Empty);
+            }
+        }
+    }
+
+    private static bool IsScrollKey(int virtualKey)
+    {
+        return virtualKey == VK_UP ||
+            virtualKey == VK_DOWN ||
+            virtualKey == VK_PAGE_UP ||
+            virtualKey == VK_PAGE_DOWN ||
+            virtualKey == VK_HOME ||
+            virtualKey == VK_END;
+    }
+
+    private const int WM_KEYDOWN = 0x0100;
+    private const int WM_VSCROLL = 0x0115;
+    private const int WM_MOUSEWHEEL = 0x020A;
+    private const int VK_PAGE_UP = 0x21;
+    private const int VK_PAGE_DOWN = 0x22;
+    private const int VK_END = 0x23;
+    private const int VK_HOME = 0x24;
+    private const int VK_UP = 0x26;
+    private const int VK_DOWN = 0x28;
 }
 
 public static class ForegroundWinArrowMonitor
@@ -389,7 +468,6 @@ public static class ForegroundWinArrowMonitor
 
     private static IntPtr HandleKeyboardMessage(int code, IntPtr message, IntPtr data)
     {
-        bool suppressRepeatedArrow = false;
         if (code >= 0)
         {
             int messageCode = unchecked((int)message.ToInt64());
@@ -437,7 +515,6 @@ public static class ForegroundWinArrowMonitor
 
                         if (!firstPress && wasCaptured)
                         {
-                            suppressRepeatedArrow = true;
                             return new IntPtr(1);
                         }
 
@@ -449,7 +526,7 @@ public static class ForegroundWinArrowMonitor
                         {
                             if (!firstPress)
                             {
-                                suppressRepeatedArrow = true;
+                                return new IntPtr(1);
                             }
                             else
                             {
@@ -476,10 +553,6 @@ public static class ForegroundWinArrowMonitor
             }
         }
 
-        if (suppressRepeatedArrow)
-        {
-            return new IntPtr(1);
-        }
         return CallNextHookEx(IntPtr.Zero, code, message, data);
     }
 
@@ -496,7 +569,6 @@ public static class ForegroundWinArrowMonitor
                 hookThreadId = currentThreadId;
                 if (stopRequested)
                 {
-                    HookReady.Set();
                     return;
                 }
             }
@@ -516,7 +588,6 @@ public static class ForegroundWinArrowMonitor
             {
                 if (stopRequested)
                 {
-                    HookReady.Set();
                     return;
                 }
                 hookHandle = installedHook;
@@ -600,10 +671,6 @@ public static class ForegroundWinArrowMonitor
 }
 "@
 
-function Test-LeftMousePressedSinceLastCheck {
-    return ((([int][NativeWindowTools]::GetAsyncKeyState([NativeWindowTools]::VK_LBUTTON)) -band 0x0001) -ne 0)
-}
-
 function Send-LiveCaptionsShortcut {
     [NativeWindowTools]::keybd_event([NativeWindowTools]::VK_LWIN, 0, 0, [UIntPtr]::Zero)
     [NativeWindowTools]::keybd_event([NativeWindowTools]::VK_CONTROL, 0, 0, [UIntPtr]::Zero)
@@ -612,228 +679,6 @@ function Send-LiveCaptionsShortcut {
     [NativeWindowTools]::keybd_event([NativeWindowTools]::VK_L, 0, [NativeWindowTools]::KEYEVENTF_KEYUP, [UIntPtr]::Zero)
     [NativeWindowTools]::keybd_event([NativeWindowTools]::VK_CONTROL, 0, [NativeWindowTools]::KEYEVENTF_KEYUP, [UIntPtr]::Zero)
     [NativeWindowTools]::keybd_event([NativeWindowTools]::VK_LWIN, 0, [NativeWindowTools]::KEYEVENTF_KEYUP, [UIntPtr]::Zero)
-}
-
-function Get-NotepadWindow {
-    param(
-        [System.Diagnostics.Process]$Process,
-        [string]$FilePath
-    )
-
-    $fileName = ""
-    if (-not [string]::IsNullOrWhiteSpace($FilePath)) {
-        $fileName = [System.IO.Path]::GetFileName($FilePath)
-    }
-
-    try {
-        $Process.Refresh()
-        if ($Process.MainWindowHandle -ne [IntPtr]::Zero -and [NativeWindowTools]::IsWindow($Process.MainWindowHandle)) {
-            return [System.Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
-        }
-    } catch {
-    }
-
-    try {
-        $root = [System.Windows.Automation.AutomationElement]::RootElement
-        $windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
-        foreach ($window in $windows) {
-            try {
-                $name = $window.Current.Name
-                $className = $window.Current.ClassName
-                $nativeWindowHandle = $window.Current.NativeWindowHandle
-                $processName = ""
-
-                try {
-                    $processName = (Get-Process -Id $window.Current.ProcessId -ErrorAction Stop).ProcessName
-                } catch {
-                }
-
-                $isSameProcess = ($null -ne $Process -and $window.Current.ProcessId -eq $Process.Id)
-                $looksLikeNotepad = (
-                    $processName -match "(?i)^notepad$" -or
-                    $className -match "(?i)notepad|applicationframewindow" -or
-                    $name -match "(?i)notepad" -or
-                    $name -match "\u30e1\u30e2\u5e33"
-                )
-                $looksLikeTargetFile = (
-                    -not [string]::IsNullOrWhiteSpace($fileName) -and
-                    $name.IndexOf($fileName, [StringComparison]::OrdinalIgnoreCase) -ge 0
-                )
-
-                if ($nativeWindowHandle -ne 0 -and ($isSameProcess -or $looksLikeTargetFile -or ($looksLikeNotepad -and $looksLikeTargetFile))) {
-                    return $window
-                }
-            } catch {
-            }
-        }
-    } catch {
-    }
-
-    return $null
-}
-
-function Get-NotepadWindowHandle {
-    param(
-        [System.Diagnostics.Process]$Process,
-        [string]$FilePath
-    )
-
-    $window = Get-NotepadWindow -Process $Process -FilePath $FilePath
-    if ($null -eq $window) {
-        return [IntPtr]::Zero
-    }
-
-    try {
-        if ($window.Current.NativeWindowHandle -ne 0) {
-            return [IntPtr]$window.Current.NativeWindowHandle
-        }
-    } catch {
-    }
-
-    return [IntPtr]::Zero
-}
-
-function Get-ForegroundProcessId {
-    $foregroundWindow = [NativeWindowTools]::GetForegroundWindow()
-    if ($foregroundWindow -eq [IntPtr]::Zero) {
-        return $null
-    }
-
-    [uint32]$processId = 0
-    [NativeWindowTools]::GetWindowThreadProcessId($foregroundWindow, [ref]$processId) | Out-Null
-
-    if ($processId -eq 0) {
-        return $null
-    }
-
-    return [int]$processId
-}
-
-function Test-NotepadIsForeground {
-    param(
-        [System.Diagnostics.Process]$Process,
-        [string]$FilePath
-    )
-
-    if ($null -eq $Process) {
-        return $false
-    }
-
-    $foregroundWindow = [NativeWindowTools]::GetForegroundWindow()
-    $targetWindow = Get-NotepadWindowHandle -Process $Process -FilePath $FilePath
-    if ($foregroundWindow -ne [IntPtr]::Zero -and $targetWindow -ne [IntPtr]::Zero -and $foregroundWindow -eq $targetWindow) {
-        return $true
-    }
-
-    $foregroundProcessId = Get-ForegroundProcessId
-    if ($null -eq $foregroundProcessId) {
-        return $false
-    }
-
-    try {
-        $Process.Refresh()
-        return $foregroundProcessId -eq $Process.Id
-    } catch {
-    }
-
-    return $false
-}
-
-function Invoke-AppActivate {
-    param([object]$Target)
-
-    try {
-        $shell = New-Object -ComObject WScript.Shell
-        return [bool]$shell.AppActivate($Target)
-    } catch {
-    }
-
-    return $false
-}
-
-function Activate-NotepadForPaste {
-    param(
-        [System.Diagnostics.Process]$Process,
-        [string]$FilePath,
-        [System.Windows.Automation.AutomationElement]$Window
-    )
-
-    $activated = $false
-
-    if ($null -ne $Window) {
-        try {
-            if ($Window.Current.NativeWindowHandle -ne 0) {
-                [NativeWindowTools]::SetForegroundWindow([IntPtr]$Window.Current.NativeWindowHandle) | Out-Null
-                $activated = $true
-            }
-        } catch {
-        }
-
-        Start-Sleep -Milliseconds 80
-        if (Focus-NotepadEditor -Window $Window) {
-            $activated = $true
-        }
-    }
-
-    if (-not $activated -and -not [string]::IsNullOrWhiteSpace($FilePath)) {
-        $fileName = [System.IO.Path]::GetFileName($FilePath)
-        $fileStem = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
-        $activated = (Invoke-AppActivate -Target $fileName) -or (Invoke-AppActivate -Target $fileStem)
-    }
-
-    if (-not $activated -and $null -ne $Process) {
-        try {
-            $activated = Invoke-AppActivate -Target $Process.Id
-        } catch {
-        }
-    }
-
-    if (-not $activated) {
-        $localizedNotepad = -join ([char]0x30e1, [char]0x30e2, [char]0x5e33)
-        $activated = (Invoke-AppActivate -Target "Notepad") -or (Invoke-AppActivate -Target $localizedNotepad)
-    }
-
-    if ($activated) {
-        Start-Sleep -Milliseconds 120
-    }
-
-    return $activated
-}
-
-function Focus-NotepadEditor {
-    param([System.Windows.Automation.AutomationElement]$Window)
-
-    if ($null -eq $Window) {
-        return $false
-    }
-
-    $controlTypes = @(
-        [System.Windows.Automation.ControlType]::Document,
-        [System.Windows.Automation.ControlType]::Edit
-    )
-
-    foreach ($controlType in $controlTypes) {
-        try {
-            $condition = New-Object System.Windows.Automation.PropertyCondition(
-                [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-                $controlType
-            )
-            $editor = $Window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
-            if ($null -ne $editor) {
-                $editor.SetFocus()
-                return $true
-            }
-        } catch {
-        }
-    }
-
-    try {
-        $Window.SetFocus()
-        return $true
-    } catch {
-    }
-
-    return $false
 }
 
 function Test-UiNoise {
@@ -854,22 +699,6 @@ function Test-UiNoise {
     )
 
     foreach ($pattern in $noisePatterns) {
-        if ($clean -match $pattern) {
-            return $true
-        }
-    }
-
-    $notepadUiPatterns = @(
-        "\.txt\b",
-        "Windows\s*\(CRLF\)",
-        "\bUTF-8\b",
-        "^\s*(Text|\u30c6\u30ad\u30b9\u30c8|Zoom|\u30ba\u30fc\u30e0)\s*$",
-        "^(\u884c|Line)\s*\d+",
-        "^(\u5217|Column)\s*\d+",
-        "^(\u30bf\u30d6\u3092\u9589\u3058\u308b|Close tab)"
-    )
-
-    foreach ($pattern in $notepadUiPatterns) {
         if ($clean -match $pattern) {
             return $true
         }
@@ -1050,11 +879,6 @@ function Get-LiveCaptionsWindow {
                     continue
                 }
 
-                $looksLikeOutputFile = $name -match "(?i)(livecaptions|caption)-\d{8}-\d{6}\.txt"
-                if ($looksLikeOutputFile) {
-                    continue
-                }
-
                 $processIsLiveCaptions = $processName -match "(?i)^livecaptions$"
                 $titleIsLiveCaptions = (
                     $name -match "^(?i:live\s*captions)$" -or
@@ -1202,42 +1026,6 @@ function Get-LiveCaptionSnapshot {
     return ($captionItems -join "`r`n")
 }
 
-function Get-AddedText {
-    param(
-        [string]$Previous,
-        [string]$Current
-    )
-
-    if ([string]::IsNullOrEmpty($Current)) {
-        return ""
-    }
-
-    if ([string]::IsNullOrEmpty($Previous)) {
-        return $Current
-    }
-
-    if ($Current -eq $Previous) {
-        return ""
-    }
-
-    if ($Current.StartsWith($Previous)) {
-        return $Current.Substring($Previous.Length)
-    }
-
-    if ($Previous.Contains($Current)) {
-        return ""
-    }
-
-    $max = [Math]::Min($Previous.Length, $Current.Length)
-    for ($length = $max; $length -gt 0; $length--) {
-        if ($Previous.Substring($Previous.Length - $length) -eq $Current.Substring(0, $length)) {
-            return $Current.Substring($length)
-        }
-    }
-
-    return "`r`n$Current"
-}
-
 function Get-LevenshteinDistance {
     param(
         [string]$Left,
@@ -1301,17 +1089,6 @@ function Get-ComparisonText {
     return (($Text -replace "\s+", "") -replace "[\u3001\u3002\uff0c\uff0e,\.]", "")
 }
 
-function Test-StableCaptionLine {
-    param([string]$Text)
-
-    $comparison = Get-ComparisonText $Text
-    if ($comparison.Length -ge 12) {
-        return $true
-    }
-
-    return ($Text.Trim() -match "[\u3002\uff0e\.\!\?\uff01\uff1f]$")
-}
-
 function Test-CompleteCaptionLine {
     param([string]$Text)
 
@@ -1336,8 +1113,7 @@ function Test-RescuableCaptionLine {
 function Get-TranscriptText {
     param(
         [string]$Captured,
-        [string]$Pending,
-        [switch]$IncludePending
+        [string]$Pending
     )
 
     $text = ""
@@ -1345,7 +1121,7 @@ function Get-TranscriptText {
         $text = $Captured
     }
 
-    if ($IncludePending -and -not [string]::IsNullOrWhiteSpace($Pending)) {
+    if (-not [string]::IsNullOrWhiteSpace($Pending)) {
         if ([string]::IsNullOrWhiteSpace($text)) {
             return $Pending
         }
@@ -1378,7 +1154,7 @@ function Test-SimilarText {
     param(
         [string]$Left,
         [string]$Right,
-        [double]$MaxDistanceRatio = 0.35
+        [double]$MaxDistanceRatio
     )
 
     $leftComparison = Get-ComparisonText $Left
@@ -1389,10 +1165,6 @@ function Test-SimilarText {
     }
 
     $maxLength = [Math]::Max($leftComparison.Length, $rightComparison.Length)
-    if ($maxLength -eq 0) {
-        return $true
-    }
-
     $distance = Get-LevenshteinDistance -Left $leftComparison -Right $rightComparison
     return (($distance / $maxLength) -le $MaxDistanceRatio)
 }
@@ -1513,124 +1285,6 @@ function Merge-CaptionText {
     return $Existing + "`r`n" + $current
 }
 
-function Set-ClipboardTextWithRetry {
-    param([string]$Text)
-
-    for ($attempt = 1; $attempt -le 5; $attempt++) {
-        try {
-            [System.Windows.Forms.Clipboard]::SetText($Text)
-            return $true
-        } catch {
-            Start-Sleep -Milliseconds 80
-        }
-    }
-
-    return $false
-}
-
-function Paste-TextToNotepad {
-    param(
-        [System.Diagnostics.Process]$Process,
-        [string]$FilePath,
-        [string]$Text,
-        [switch]$OnlyWhenNotepadIsForeground
-    )
-
-    if ([string]::IsNullOrEmpty($Text)) {
-        return "pasted"
-    }
-
-    if ($OnlyWhenNotepadIsForeground -and -not (Test-NotepadIsForeground -Process $Process -FilePath $FilePath)) {
-        return "paused"
-    }
-
-    $window = Get-NotepadWindow -Process $Process -FilePath $FilePath
-    $oldClipboard = $null
-    $hadClipboardText = $false
-
-    try {
-        $hadClipboardText = [System.Windows.Forms.Clipboard]::ContainsText()
-        if ($hadClipboardText) {
-            $oldClipboard = [System.Windows.Forms.Clipboard]::GetText()
-        }
-    } catch {
-    }
-
-    if (-not (Set-ClipboardTextWithRetry -Text $Text)) {
-        return "failed"
-    }
-
-    if ($OnlyWhenNotepadIsForeground) {
-        Focus-NotepadEditor -Window $window | Out-Null
-        Start-Sleep -Milliseconds 50
-    } else {
-        if (-not (Activate-NotepadForPaste -Process $Process -FilePath $FilePath -Window $window)) {
-            if ($hadClipboardText) {
-                Set-ClipboardTextWithRetry -Text $oldClipboard | Out-Null
-            }
-            return "failed"
-        }
-    }
-
-    [System.Windows.Forms.SendKeys]::SendWait("^v")
-    Start-Sleep -Milliseconds 50
-    [System.Windows.Forms.SendKeys]::SendWait("^s")
-
-    if ($hadClipboardText) {
-        Start-Sleep -Milliseconds 50
-        Set-ClipboardTextWithRetry -Text $oldClipboard | Out-Null
-    }
-
-    return "pasted"
-}
-
-function Sync-TextToNotepad {
-    param(
-        [System.Diagnostics.Process]$Process,
-        [string]$FilePath,
-        [string]$Text
-    )
-
-    if ([string]::IsNullOrEmpty($Text)) {
-        return "pasted"
-    }
-
-    if (-not (Test-NotepadIsForeground -Process $Process -FilePath $FilePath)) {
-        return "paused"
-    }
-
-    $window = Get-NotepadWindow -Process $Process -FilePath $FilePath
-    $oldClipboard = $null
-    $hadClipboardText = $false
-
-    try {
-        $hadClipboardText = [System.Windows.Forms.Clipboard]::ContainsText()
-        if ($hadClipboardText) {
-            $oldClipboard = [System.Windows.Forms.Clipboard]::GetText()
-        }
-    } catch {
-    }
-
-    if (-not (Set-ClipboardTextWithRetry -Text $Text)) {
-        return "failed"
-    }
-
-    Focus-NotepadEditor -Window $window | Out-Null
-    Start-Sleep -Milliseconds 50
-    [System.Windows.Forms.SendKeys]::SendWait("^a")
-    Start-Sleep -Milliseconds 40
-    [System.Windows.Forms.SendKeys]::SendWait("^v")
-    Start-Sleep -Milliseconds 50
-    [System.Windows.Forms.SendKeys]::SendWait("^s")
-
-    if ($hadClipboardText) {
-        Start-Sleep -Milliseconds 50
-        Set-ClipboardTextWithRetry -Text $oldClipboard | Out-Null
-    }
-
-    return "pasted"
-}
-
 function ConvertFrom-Utf8Base64 {
     param([string]$Value)
     return [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Value))
@@ -1665,7 +1319,7 @@ $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
 $form.Left = $workingArea.Left + [int](($workingArea.Width - $form.Width) / 2)
 $form.Top = $workingArea.Bottom - $form.Height - 40
 
-$textDisplay = New-Object System.Windows.Forms.RichTextBox
+$textDisplay = New-Object TranscriptRichTextBox
 $textDisplay.Dock = [System.Windows.Forms.DockStyle]::Fill
 $textDisplay.ReadOnly = $true
 $textDisplay.TabStop = $false
@@ -1701,6 +1355,9 @@ $closeButton.BringToFront()
 $form.ActiveControl = $null
 
 $resizeBorderThickness = 8
+$followTranscriptTail = $true
+$transcriptScrollUpdateDepth = 0
+$textDisplayTopAnchorPoint = New-Object System.Drawing.Point(1, 1)
 
 function Get-ResizeHitTestCode {
     param(
@@ -1724,25 +1381,6 @@ function Get-ResizeHitTestCode {
     if ($isBottom) { return [NativeWindowTools]::HTBOTTOM }
 
     return [NativeWindowTools]::HTCAPTION
-}
-
-function Test-TextDisplayAtBottom {
-    if ($textDisplay.TextLength -eq 0 -or $textDisplay.ClientSize.Height -le 2) {
-        return $true
-    }
-
-    $bottomPoint = New-Object System.Drawing.Point(1, ($textDisplay.ClientSize.Height - 2))
-    $lastVisibleCharacter = $textDisplay.GetCharIndexFromPosition($bottomPoint)
-    $lastVisibleLine = $textDisplay.GetLineFromCharIndex($lastVisibleCharacter)
-    $internalText = ConvertTo-RichTextBoxInternalText -Text $textDisplay.Text
-    $lastContentCharacter = $internalText.TrimEnd([char[]]@([char]10)).Length - 1
-    if ($lastContentCharacter -lt 0) {
-        return $true
-    }
-
-    $lastTextLine = $textDisplay.GetLineFromCharIndex($lastContentCharacter)
-
-    return $lastVisibleLine -ge $lastTextLine
 }
 
 function ConvertTo-RichTextBoxInternalText {
@@ -1775,95 +1413,20 @@ function Convert-TextPositionAfterDisplayChange {
     return $ChangeStart + [Math]::Min($Position - $ChangeStart, $NewLength)
 }
 
-function Test-TextDisplayTailFullyVisible {
-    if ($textDisplay.TextLength -eq 0 -or $textDisplay.ClientSize.Height -le 2) {
-        return $true
+function Test-TextDisplayAtBottom {
+    return [NativeWindowTools]::IsRichEditAtBottom($textDisplay.Handle)
+}
+
+function Update-TranscriptTailFollowState {
+    if ($script:transcriptScrollUpdateDepth -gt 0) {
+        return
     }
 
-    $anchorIndex = $textDisplay.TextLength
-    $anchorPosition = $textDisplay.GetPositionFromCharIndex($anchorIndex)
-    if ($anchorPosition.Y -gt ($textDisplay.ClientSize.Height - 2)) {
-        return $false
-    }
-
-    $anchorLine = $textDisplay.GetLineFromCharIndex($anchorIndex)
-    if ($anchorLine -le 0) {
-        return $anchorPosition.Y -ge 0
-    }
-
-    $lastVisibleRowStart = $textDisplay.GetFirstCharIndexFromLine($anchorLine - 1)
-    if ($lastVisibleRowStart -lt 0) {
-        return $false
-    }
-
-    $lastVisibleRowPosition = $textDisplay.GetPositionFromCharIndex($lastVisibleRowStart)
-    return $lastVisibleRowPosition.Y -ge 0
+    $script:followTranscriptTail = Test-TextDisplayAtBottom
 }
 
 function Set-TextDisplayTailVisible {
-    param([int]$PreferredScrollY)
-
-    $selectionStart = $textDisplay.SelectionStart
-    $selectionLength = $textDisplay.SelectionLength
-    if ($textDisplay.TextLength -eq 0 -or $textDisplay.ClientSize.Height -le 2) {
-        return
-    }
-
-    $anchorIndex = $textDisplay.TextLength
-    $currentScrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplay.Handle)
-    if ($PreferredScrollY -gt 30000 -or $currentScrollY -gt 30000) {
-        if (-not (Test-TextDisplayTailFullyVisible)) {
-            $textDisplay.Select($anchorIndex, 0)
-            $textDisplay.ScrollToCaret()
-        }
-        return
-    }
-
-    [NativeWindowTools]::SetRichEditScrollY($textDisplay.Handle, $PreferredScrollY)
-    $anchorPosition = $textDisplay.GetPositionFromCharIndex($anchorIndex)
-    $visibleBottom = $textDisplay.ClientSize.Height - 2
-
-    if ($anchorPosition.Y -gt 30000) {
-        $textDisplay.Select($anchorIndex, 0)
-        $textDisplay.ScrollToCaret()
-        return
-    }
-
-    if ($anchorPosition.Y -gt $visibleBottom) {
-        $currentScrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplay.Handle)
-        [NativeWindowTools]::SetRichEditScrollY(
-            $textDisplay.Handle,
-            ($currentScrollY + $anchorPosition.Y - $visibleBottom)
-        )
-
-        $anchorPosition = $textDisplay.GetPositionFromCharIndex($anchorIndex)
-        if ($anchorPosition.Y -gt $visibleBottom) {
-            $textDisplay.Select($anchorIndex, 0)
-            $textDisplay.ScrollToCaret()
-            $tailScrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplay.Handle)
-            $textDisplay.Select($selectionStart, $selectionLength)
-            [NativeWindowTools]::SetRichEditScrollY($textDisplay.Handle, $tailScrollY)
-        }
-    }
-
-    $anchorLine = $textDisplay.GetLineFromCharIndex($anchorIndex)
-    if ($anchorLine -le 0) {
-        return
-    }
-
-    $lastVisibleRowStart = $textDisplay.GetFirstCharIndexFromLine($anchorLine - 1)
-    if ($lastVisibleRowStart -lt 0) {
-        return
-    }
-
-    $lastVisibleRowPosition = $textDisplay.GetPositionFromCharIndex($lastVisibleRowStart)
-    if ($lastVisibleRowPosition.Y -lt 0) {
-        $currentScrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplay.Handle)
-        [NativeWindowTools]::SetRichEditScrollY(
-            $textDisplay.Handle,
-            [Math]::Max(0, ($currentScrollY + $lastVisibleRowPosition.Y))
-        )
-    }
+    [NativeWindowTools]::ScrollRichEditToBottom($textDisplay.Handle)
 }
 
 function Get-TranscriptDisplayTextWithBottomPadding {
@@ -1878,57 +1441,66 @@ function Get-TranscriptDisplayTextWithBottomPadding {
 }
 
 function Set-TranscriptDisplayText {
-    param(
-        [string]$Text,
-        [switch]$PreserveUserScroll
-    )
+    param([string]$Text)
 
     $displayText = Get-TranscriptDisplayTextWithBottomPadding -Text $Text
     $newInternalText = ConvertTo-RichTextBoxInternalText -Text $displayText
     $oldInternalText = ConvertTo-RichTextBoxInternalText -Text $textDisplay.Text
     $textDisplayHandle = $textDisplay.Handle
-    $wasAtBottom = $PreserveUserScroll -and
-        (Test-TextDisplayAtBottom) -and
-        $textDisplay.SelectionLength -eq 0
-    $scrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplayHandle)
+    $followTail = $script:followTranscriptTail
     $selectionStart = $textDisplay.SelectionStart
     $selectionEnd = $selectionStart + $textDisplay.SelectionLength
+    $firstVisibleCharacter = 0
+    if (-not $followTail) {
+        $firstVisibleCharacter = $textDisplay.GetCharIndexFromPosition($script:textDisplayTopAnchorPoint)
+    }
 
     $changeRange = [NativeWindowTools]::GetTextChangeRange($oldInternalText, $newInternalText)
     $changeStart = $changeRange[0]
     $oldChangeLength = $changeRange[1]
     $newChangeLength = $changeRange[2]
 
-    if ($oldChangeLength -gt 0 -or $newChangeLength -gt 0) {
-        $replacementText = $newInternalText.Substring($changeStart, $newChangeLength)
-        $textDisplay.Select($changeStart, $oldChangeLength)
-        $textDisplay.SelectedText = $replacementText
-        $textDisplay.ClearUndo()
-    }
+    $script:transcriptScrollUpdateDepth++
+    try {
+        if ($oldChangeLength -gt 0 -or $newChangeLength -gt 0) {
+            $replacementText = $newInternalText.Substring($changeStart, $newChangeLength)
+            $textDisplay.Select($changeStart, $oldChangeLength)
+            $textDisplay.SelectedText = $replacementText
+            $textDisplay.ClearUndo()
+        }
 
-    if (-not $wasAtBottom) {
-        $selectionStart = Convert-TextPositionAfterDisplayChange `
-            -Position $selectionStart `
-            -ChangeStart $changeStart `
-            -OldLength $oldChangeLength `
-            -NewLength $newChangeLength
-        $selectionEnd = Convert-TextPositionAfterDisplayChange `
-            -Position $selectionEnd `
-            -ChangeStart $changeStart `
-            -OldLength $oldChangeLength `
-            -NewLength $newChangeLength
+        if ($followTail) {
+            Set-TextDisplayTailVisible
+        } else {
+            $selectionStart = Convert-TextPositionAfterDisplayChange `
+                -Position $selectionStart `
+                -ChangeStart $changeStart `
+                -OldLength $oldChangeLength `
+                -NewLength $newChangeLength
+            $selectionEnd = Convert-TextPositionAfterDisplayChange `
+                -Position $selectionEnd `
+                -ChangeStart $changeStart `
+                -OldLength $oldChangeLength `
+                -NewLength $newChangeLength
 
-        $selectionStart = [Math]::Max(0, [Math]::Min($selectionStart, $textDisplay.TextLength))
-        $selectionEnd = [Math]::Max($selectionStart, [Math]::Min($selectionEnd, $textDisplay.TextLength))
-        $textDisplay.Select($selectionStart, ($selectionEnd - $selectionStart))
-    }
+            $selectionStart = [Math]::Max(0, [Math]::Min($selectionStart, $textDisplay.TextLength))
+            $selectionEnd = [Math]::Max($selectionStart, [Math]::Min($selectionEnd, $textDisplay.TextLength))
+            $textDisplay.Select($selectionStart, ($selectionEnd - $selectionStart))
 
-    if (-not $PreserveUserScroll) {
-        [NativeWindowTools]::SetRichEditScrollY($textDisplayHandle, 0)
-    } elseif ($wasAtBottom) {
-        Set-TextDisplayTailVisible -PreferredScrollY $scrollY
-    } else {
-        [NativeWindowTools]::SetRichEditScrollY($textDisplayHandle, $scrollY)
+            $firstVisibleCharacter = Convert-TextPositionAfterDisplayChange `
+                -Position $firstVisibleCharacter `
+                -ChangeStart $changeStart `
+                -OldLength $oldChangeLength `
+                -NewLength $newChangeLength
+            $firstVisibleCharacter = [Math]::Max(0, [Math]::Min($firstVisibleCharacter, $textDisplay.TextLength))
+            $firstVisibleLine = $textDisplay.GetLineFromCharIndex($firstVisibleCharacter)
+            [NativeWindowTools]::SetRichEditFirstVisibleLine($textDisplayHandle, $firstVisibleLine)
+        }
+    } finally {
+        $script:transcriptScrollUpdateDepth = [Math]::Max(0, ($script:transcriptScrollUpdateDepth - 1))
+        if ($followTail) {
+            $script:followTranscriptTail = $true
+        }
     }
 }
 
@@ -1941,28 +1513,38 @@ $normalBounds = $form.Bounds
 function Set-TranscriptWindowBounds {
     param([System.Drawing.Rectangle]$Bounds)
 
-    $followTail = (Test-TextDisplayAtBottom) -and $textDisplay.SelectionLength -eq 0
-    $scrollY = [NativeWindowTools]::GetRichEditScrollY($textDisplay.Handle)
+    $followTail = $script:followTranscriptTail
     $selectionStart = $textDisplay.SelectionStart
     $selectionLength = $textDisplay.SelectionLength
-
-    $effectiveMinimumWidth = [Math]::Min($script:preferredMinimumSize.Width, [Math]::Max(1, $Bounds.Width))
-    $effectiveMinimumHeight = [Math]::Min($script:preferredMinimumSize.Height, [Math]::Max(1, $Bounds.Height))
-    $form.MinimumSize = New-Object System.Drawing.Size($effectiveMinimumWidth, $effectiveMinimumHeight)
-    $form.Bounds = $Bounds
-    $form.PerformLayout()
-
-    if ($followTail) {
-        $textDisplay.SelectionStart = $textDisplay.TextLength
-        $textDisplay.SelectionLength = 0
-        $textDisplay.ScrollToCaret()
-        return
+    $firstVisibleCharacter = 0
+    if (-not $followTail) {
+        $firstVisibleCharacter = $textDisplay.GetCharIndexFromPosition($script:textDisplayTopAnchorPoint)
     }
 
-    $selectionStart = [Math]::Min($selectionStart, $textDisplay.TextLength)
-    $selectionLength = [Math]::Min($selectionLength, $textDisplay.TextLength - $selectionStart)
-    $textDisplay.Select($selectionStart, $selectionLength)
-    [NativeWindowTools]::SetRichEditScrollY($textDisplay.Handle, $scrollY)
+    $script:transcriptScrollUpdateDepth++
+    try {
+        $effectiveMinimumWidth = [Math]::Min($script:preferredMinimumSize.Width, [Math]::Max(1, $Bounds.Width))
+        $effectiveMinimumHeight = [Math]::Min($script:preferredMinimumSize.Height, [Math]::Max(1, $Bounds.Height))
+        $form.MinimumSize = New-Object System.Drawing.Size($effectiveMinimumWidth, $effectiveMinimumHeight)
+        $form.Bounds = $Bounds
+        $form.PerformLayout()
+
+        if ($followTail) {
+            Set-TextDisplayTailVisible
+        } else {
+            $selectionStart = [Math]::Min($selectionStart, $textDisplay.TextLength)
+            $selectionLength = [Math]::Min($selectionLength, $textDisplay.TextLength - $selectionStart)
+            $textDisplay.Select($selectionStart, $selectionLength)
+            $firstVisibleCharacter = [Math]::Max(0, [Math]::Min($firstVisibleCharacter, $textDisplay.TextLength))
+            $firstVisibleLine = $textDisplay.GetLineFromCharIndex($firstVisibleCharacter)
+            [NativeWindowTools]::SetRichEditFirstVisibleLine($textDisplay.Handle, $firstVisibleLine)
+        }
+    } finally {
+        $script:transcriptScrollUpdateDepth = [Math]::Max(0, ($script:transcriptScrollUpdateDepth - 1))
+        if ($followTail) {
+            $script:followTranscriptTail = $true
+        }
+    }
 }
 
 function Toggle-FullScreen {
@@ -2088,8 +1670,8 @@ function Get-WindowSnapBoundsForWorkingArea {
         [System.Drawing.Rectangle]$WorkingArea,
         [ValidateSet("Left", "Right", "TopLeft", "TopRight", "BottomLeft", "BottomRight", "Maximized")]
         [string]$Mode,
-        [int]$MinimumWidth = 1,
-        [int]$MinimumHeight = 1
+        [int]$MinimumWidth,
+        [int]$MinimumHeight
     )
 
     $leftWidth = [int][Math]::Floor($WorkingArea.Width / 2)
@@ -2200,7 +1782,7 @@ function Get-WindowSnapBoundsForMode {
 function Get-AdjacentScreen {
     param(
         [System.Windows.Forms.Screen]$CurrentScreen,
-        [ValidateSet("Left", "Right", "Up", "Down")]
+        [ValidateSet("Left", "Right")]
         [string]$Direction
     )
 
@@ -2218,49 +1800,26 @@ function Get-AdjacentScreen {
         $candidateBounds = $candidate.Bounds
         $candidateCenterX = $candidateBounds.Left + ($candidateBounds.Width / 2.0)
         $candidateCenterY = $candidateBounds.Top + ($candidateBounds.Height / 2.0)
-        $isInDirection = $false
-        $hasPerpendicularOverlap = $false
-        $primaryDistance = 0.0
-        $perpendicularGap = 0.0
-        $perpendicularCenterDistance = 0.0
-
-        if ($Direction -eq "Left" -or $Direction -eq "Right") {
-            $isInDirection = if ($Direction -eq "Left") {
-                $candidateCenterX -lt $currentCenterX
-            } else {
-                $candidateCenterX -gt $currentCenterX
-            }
-            $hasPerpendicularOverlap = $candidateBounds.Top -lt $currentBounds.Bottom -and
-                $candidateBounds.Bottom -gt $currentBounds.Top
-            if (-not $hasPerpendicularOverlap) {
-                $perpendicularGap = [Math]::Min(
-                    [Math]::Abs($candidateBounds.Top - $currentBounds.Bottom),
-                    [Math]::Abs($currentBounds.Top - $candidateBounds.Bottom)
-                )
-            }
-            $primaryDistance = [Math]::Abs($candidateCenterX - $currentCenterX)
-            $perpendicularCenterDistance = [Math]::Abs($candidateCenterY - $currentCenterY)
+        $isInDirection = if ($Direction -eq "Left") {
+            $candidateCenterX -lt $currentCenterX
         } else {
-            $isInDirection = if ($Direction -eq "Up") {
-                $candidateCenterY -lt $currentCenterY
-            } else {
-                $candidateCenterY -gt $currentCenterY
-            }
-            $hasPerpendicularOverlap = $candidateBounds.Left -lt $currentBounds.Right -and
-                $candidateBounds.Right -gt $currentBounds.Left
-            if (-not $hasPerpendicularOverlap) {
-                $perpendicularGap = [Math]::Min(
-                    [Math]::Abs($candidateBounds.Left - $currentBounds.Right),
-                    [Math]::Abs($currentBounds.Left - $candidateBounds.Right)
-                )
-            }
-            $primaryDistance = [Math]::Abs($candidateCenterY - $currentCenterY)
-            $perpendicularCenterDistance = [Math]::Abs($candidateCenterX - $currentCenterX)
+            $candidateCenterX -gt $currentCenterX
         }
-
         if (-not $isInDirection) {
             continue
         }
+
+        $hasPerpendicularOverlap = $candidateBounds.Top -lt $currentBounds.Bottom -and
+            $candidateBounds.Bottom -gt $currentBounds.Top
+        $perpendicularGap = 0.0
+        if (-not $hasPerpendicularOverlap) {
+            $perpendicularGap = [Math]::Min(
+                [Math]::Abs($candidateBounds.Top - $currentBounds.Bottom),
+                [Math]::Abs($currentBounds.Top - $candidateBounds.Bottom)
+            )
+        }
+        $primaryDistance = [Math]::Abs($candidateCenterX - $currentCenterX)
+        $perpendicularCenterDistance = [Math]::Abs($candidateCenterY - $currentCenterY)
 
         $overlapPenalty = if ($hasPerpendicularOverlap) { 0.0 } else { 1000000000000.0 }
         $score = $overlapPenalty +
@@ -2284,8 +1843,8 @@ function Convert-WindowBoundsToScreen {
         [System.Drawing.Rectangle]$Bounds,
         [System.Windows.Forms.Screen]$SourceScreen,
         [System.Windows.Forms.Screen]$TargetScreen,
-        [int]$MinimumWidth = 1,
-        [int]$MinimumHeight = 1
+        [int]$MinimumWidth,
+        [int]$MinimumHeight
     )
 
     $sourceArea = $SourceScreen.WorkingArea
@@ -2408,8 +1967,8 @@ function Set-WindowSnapMode {
     param(
         [ValidateSet("Left", "Right", "TopLeft", "TopRight", "BottomLeft", "BottomRight", "Maximized")]
         [string]$Mode,
-        [System.Windows.Forms.Screen]$Screen = [System.Windows.Forms.Screen]::FromRectangle($form.Bounds),
-        [System.Drawing.Rectangle]$RestoreBounds = [System.Drawing.Rectangle]::Empty
+        [System.Windows.Forms.Screen]$Screen,
+        [System.Drawing.Rectangle]$RestoreBounds
     )
 
     if ($script:isFullScreen) {
@@ -2472,8 +2031,8 @@ function Get-HorizontalWinArrowAction {
         [string]$Mode,
         [ValidateSet("Left", "Right")]
         [string]$Direction,
-        [bool]$IsPortrait = $false,
-        [bool]$CanSplitHorizontally = $true
+        [bool]$IsPortrait,
+        [bool]$CanSplitHorizontally
     )
 
     if (-not $CanSplitHorizontally -and ($Mode -eq "Left" -or $Mode -eq "Right")) {
@@ -2679,20 +2238,33 @@ function Invoke-PendingWinArrowShortcuts {
 
 $formClosed = $false
 $followTailAfterResize = $false
+$resizeScrollTrackingActive = $false
 $f11Held = $false
-$winArrowMonitorInstalled = $false
 $form.Add_FormClosed({ $script:formClosed = $true })
 $form.Add_ResizeBegin({
-    $script:followTailAfterResize = (Test-TextDisplayAtBottom) -and $textDisplay.SelectionLength -eq 0
+    $script:followTailAfterResize = $script:followTranscriptTail
+    if (-not $script:resizeScrollTrackingActive) {
+        $script:transcriptScrollUpdateDepth++
+        $script:resizeScrollTrackingActive = $true
+    }
 })
 $form.Add_ResizeEnd({
-    if ($script:followTailAfterResize) {
-        $textDisplay.SelectionStart = $textDisplay.TextLength
-        $textDisplay.SelectionLength = 0
-        $textDisplay.ScrollToCaret()
+    try {
+        if ($script:followTailAfterResize) {
+            Set-TextDisplayTailVisible
+        }
+    } finally {
+        if ($script:resizeScrollTrackingActive) {
+            $script:transcriptScrollUpdateDepth = [Math]::Max(0, ($script:transcriptScrollUpdateDepth - 1))
+            $script:resizeScrollTrackingActive = $false
+        }
+        if ($script:followTailAfterResize) {
+            $script:followTranscriptTail = $true
+        }
+        $script:followTailAfterResize = $false
     }
-    $script:followTailAfterResize = $false
 })
+$textDisplay.Add_UserScrollChanged({ Update-TranscriptTailFollowState })
 $handleWindowKeys = {
     param($sender, $eventArgs)
     if ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Escape) {
@@ -2840,7 +2412,7 @@ $form.Add_MouseDown({
 })
 $form.Show()
 $form.Activate()
-$winArrowMonitorInstalled = [ForegroundWinArrowMonitor]::Install($form.Handle)
+[ForegroundWinArrowMonitor]::Install($form.Handle) | Out-Null
 
 $ownedLiveCaptionsProcessId = 0
 $lastLiveCaptionsStartAttempt = [DateTime]::MinValue
@@ -2848,7 +2420,6 @@ Close-LiveCaptions
 Send-LiveCaptionsShortcut
 $lastLiveCaptionsStartAttempt = Get-Date
 
-$lastSnapshot = ""
 $capturedText = ""
 $pendingCaptionText = ""
 $lastDisplayedText = ""
@@ -2865,102 +2436,27 @@ function Add-CapturedCaptionLine {
     param([string]$Line)
 
     if ([string]::IsNullOrWhiteSpace($Line)) {
-        return $false
+        return
     }
 
     $mergedText = Merge-CaptionText -Existing $script:capturedText -Snapshot $Line
-
     if ($mergedText -ne $script:capturedText) {
         $script:capturedText = $mergedText
-        return $true
     }
-
-    return $false
-}
-
-function Test-PendingCaptionSupersededByLine {
-    param(
-        [string]$Pending,
-        [string]$Line
-    )
-
-    if ([string]::IsNullOrWhiteSpace($Pending) -or [string]::IsNullOrWhiteSpace($Line)) {
-        return $false
-    }
-
-    if ($Pending -eq $Line) {
-        return $true
-    }
-
-    if (Test-PrefixRevision -Shorter $Pending -Longer $Line) {
-        return $true
-    }
-
-    $pendingComparison = Get-ComparisonText $Pending
-    $lineComparison = Get-ComparisonText $Line
-
-    if ($pendingComparison.Length -lt 8 -or $lineComparison.Length -lt [int]($pendingComparison.Length * 0.6)) {
-        return $false
-    }
-
-    return (Test-SimilarText -Left $Pending -Right $Line -MaxDistanceRatio 0.34)
 }
 
 function Flush-PendingCaptionText {
     if ([string]::IsNullOrWhiteSpace($script:pendingCaptionText)) {
-        return $false
+        return
     }
 
     if (-not (Test-RescuableCaptionLine $script:pendingCaptionText)) {
         $script:pendingCaptionText = ""
-        return $false
+        return
     }
 
-    $changed = Add-CapturedCaptionLine -Line $script:pendingCaptionText
+    Add-CapturedCaptionLine -Line $script:pendingCaptionText
     $script:pendingCaptionText = ""
-    return $changed
-}
-
-function Set-PendingCaptionTextSafely {
-    param([string]$Text)
-
-    $newPending = Normalize-CaptionText $Text
-    if ([string]::IsNullOrWhiteSpace($newPending)) {
-        return $false
-    }
-
-    if ([string]::IsNullOrWhiteSpace($script:pendingCaptionText)) {
-        $script:pendingCaptionText = $newPending
-        return $false
-    }
-
-    if (Test-PendingCaptionSupersededByLine -Pending $script:pendingCaptionText -Line $newPending) {
-        $script:pendingCaptionText = $newPending
-        return $false
-    }
-
-    if (Test-PendingCaptionSupersededByLine -Pending $newPending -Line $script:pendingCaptionText) {
-        return $false
-    }
-
-    $changed = Flush-PendingCaptionText
-    $script:pendingCaptionText = $newPending
-    return $changed
-}
-
-function Resolve-PendingCaptionBeforeCapturedLine {
-    param([string]$Line)
-
-    if ([string]::IsNullOrWhiteSpace($script:pendingCaptionText)) {
-        return $false
-    }
-
-    if (Test-PendingCaptionSupersededByLine -Pending $script:pendingCaptionText -Line $Line) {
-        $script:pendingCaptionText = ""
-        return $false
-    }
-
-    return (Flush-PendingCaptionText)
 }
 
 function Wait-ForNextTranscriptPoll {
@@ -3075,31 +2571,29 @@ try {
         }
 
         for ($lineIndex = 0; $lineIndex -lt ($snapshotLines.Count - 1); $lineIndex++) {
-            Add-CapturedCaptionLine -Line $snapshotLines[$lineIndex] | Out-Null
+            Add-CapturedCaptionLine -Line $snapshotLines[$lineIndex]
         }
 
         $pendingCaptionText = Normalize-CaptionText $snapshotLines[$snapshotLines.Count - 1]
 
-        $displayText = Get-TranscriptText -Captured $capturedText -Pending $pendingCaptionText -IncludePending
+        $displayText = Get-TranscriptText -Captured $capturedText -Pending $pendingCaptionText
         if (-not [string]::IsNullOrWhiteSpace($displayText) -and $displayText -ne $lastDisplayedText) {
             Save-CapturedText -Text $displayText
-            Set-TranscriptDisplayText -Text $displayText -PreserveUserScroll
+            Set-TranscriptDisplayText -Text $displayText
             $lastDisplayedText = $displayText
         }
 
-        $lastSnapshot = $snapshot
         Wait-ForNextTranscriptPoll -Milliseconds $PollMilliseconds
     }
 } finally {
     try {
         [ForegroundWinArrowMonitor]::Uninstall()
-        $winArrowMonitorInstalled = $false
     } catch {
     }
 
     try {
-        Flush-PendingCaptionText | Out-Null
-        $finalText = Get-TranscriptText -Captured $capturedText -Pending $pendingCaptionText -IncludePending
+        Flush-PendingCaptionText
+        $finalText = Get-TranscriptText -Captured $capturedText -Pending $pendingCaptionText
         Save-CapturedText -Text $finalText
     } catch {
     }

@@ -175,7 +175,7 @@ Windows 11 の **ターミナルで開く** を使って、そのフォルダー
 
 横長モニターでは四隅が4分の1表示になります。縦長モニターでは、四隅へのドラッグ、または左右半分からの `Win + ↑ / ↓` が全幅の上半分・下半分になり、文字欄が細長くなりすぎるのを防ぎます。左右半分の配置も引き続き使用できます。高い表示倍率などで画面が非常に細く、最小サイズを保ったまま分割できない場合は、画面外にはみ出さない配置へ自動的に切り替わります。
 
-最新行を見ている間は、新しい文字へ自動で追従します。上へスクロールして過去の行を読んでいる間や文字を選択している間は、可能な限り表示位置と選択範囲を保ちます。
+最新行を見ている間は、新しい文字へ自動で追従します。上へスクロールして過去の行を読んでいる間は表示位置を保ち、最下部へ戻ると自動追従を再開します。文字を選択しただけでは追従を停止しません。コピーするときは、先に少し上へスクロールしてから文字を選択すると、その位置と選択範囲を保てます。
 
 最新行の下には表示専用の1行分の余白を確保し、一番下の文字が途中で切れないようにします。この余白は保存される文字起こしファイルには入りません。
 
@@ -588,7 +588,7 @@ Only one transcription window can run at a time. Opening the shortcut again whil
 
 On a landscape monitor, the four corners produce quarter-screen layouts. On a portrait monitor, dragging to a corner or pressing `Win + Up / Down` from a left/right half produces a full-width top or bottom half, avoiding an excessively narrow text column. Left and right halves remain available. If high display scaling makes a screen too narrow to preserve the minimum window size in a split, the app automatically falls back to a layout that stays on-screen.
 
-When you are at the bottom, the view follows new text automatically. While you are reading older lines or selecting text, the app tries to preserve the scroll position and selection.
+When you are at the bottom, the view follows new text automatically. Scrolling upward pauses tail following and preserves your reading position; returning to the bottom resumes it. Selecting text alone does not pause following. To copy text without the view moving, scroll upward slightly before selecting it.
 
 The app keeps one display-only line of space below the newest text so the bottom line remains fully visible. This space is not written to the saved transcript file.
 
